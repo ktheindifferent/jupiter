@@ -1,0 +1,11 @@
+version: "3.9"
+services:
+  web:
+    build: .
+    ports:
+      - "9091:9091"
+    expose:
+      - "9091"
+  rust:
+    image: "rust:latest"
+    
