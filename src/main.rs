@@ -1,4 +1,4 @@
-extern crate weather_rs;
+extern crate jupiter;
 
 use jupiter::provider::accuweather::Location;
 use jupiter::provider::accuweather::Forecast;
