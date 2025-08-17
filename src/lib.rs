@@ -11,6 +11,7 @@
 extern crate postgres;
 pub mod provider;
 pub mod auth;
+pub mod ssl_config;
 
 #[cfg(test)]
 mod tests;

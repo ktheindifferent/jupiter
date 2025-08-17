@@ -16,8 +16,7 @@ use crate::auth::{validate_auth_header, RateLimiter};
 use std::sync::Arc;
 
 use tokio_postgres::{Error, Row};
-use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
-use postgres_openssl::MakeTlsConnector;
+use crate::ssl_config::{create_homebrew_connector, SslConfig};
 
 // Can have multiple homebrew instruments
 // Support temperature humidity, windspeed, wind direction, percipitation, PM2.5, PM10, C02, TVOC, etc.
@@ -105,9 +104,12 @@ impl Config {
 
     pub async fn build_tables(&self) -> Result<(), Error>{
     
-        let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-        builder.set_verify(SslVerifyMode::NONE);
-        let connector = MakeTlsConnector::new(builder.build());
+        // Use centralized SSL configuration
+        let connector = create_homebrew_connector()
+            .unwrap_or_else(|e| {
+                log::error!("Failed to create SSL connector: {}", e);
+                panic!("Unable to create SSL connector: {}", e);
+            });
     
         let (client, connection) = tokio_postgres::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &self.pg.username, &self.pg.password, &self.pg.address, &self.pg.db_name).as_str(), connector).await?;
         
@@ -201,12 +203,12 @@ impl WeatherReport {
         // Get a copy of the master key and postgres info
         let postgres = config.pg.clone();
 
-        // Build SQL adapter that skips verification for self signed certificates
-        let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-        builder.set_verify(SslVerifyMode::NONE);
-
-        // Build connector with the adapter from above
-        let connector = MakeTlsConnector::new(builder.build());
+        // Build SQL adapter with proper SSL verification
+        let connector = create_homebrew_connector()
+            .unwrap_or_else(|e| {
+                log::error!("Failed to create SSL connector: {}", e);
+                panic!("Unable to create SSL connector: {}", e);
+            });
 
         // Build postgres client
         let mut client = crate::postgres::Client::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), connector)?;
@@ -325,9 +327,11 @@ impl WeatherReport {
             None => {}
         }
 
-        let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-        builder.set_verify(SslVerifyMode::NONE);
-        let connector = MakeTlsConnector::new(builder.build());
+        let connector = create_homebrew_connector()
+            .unwrap_or_else(|e| {
+                log::error!("Failed to create SSL connector: {}", e);
+                panic!("Unable to create SSL connector: {}", e);
+            });
         let mut client = crate::postgres::Client::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), connector)?;
 
         let mut parsed_rows: Vec<Self> = Vec::new();
