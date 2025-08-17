@@ -12,6 +12,8 @@ use rouille::post_input;
 use rouille::session;
 use rouille::try_or_400;
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::auth::{validate_auth_header, RateLimiter};
+use std::sync::Arc;
 
 use tokio_postgres::{Error, Row};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
@@ -41,17 +43,14 @@ impl Config {
 
         let config = self.clone();
         thread::spawn(move || {
+            // Create rate limiter: max 10 attempts per minute per IP
+            let rate_limiter = Arc::new(RateLimiter::new(10, 60));
+            
             rouille::start_server(format!("0.0.0.0:{}", config.port).as_str(), move |request| {
     
-    
-                let auth_header = request.header("Authorization");
-    
-                if auth_header.is_none(){
-                    return Response::empty_404();
-                } else {
-                    if auth_header.unwrap().to_string() != config.apikey{
-                        return Response::empty_404();
-                    }
+                // Validate authentication with rate limiting
+                if let Err(response) = validate_auth_header(request, &config.apikey, Some(&rate_limiter)) {
+                    return response;
                 }
     
                 if request.url() == "/api/weather_reports" {
