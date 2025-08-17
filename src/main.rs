@@ -1,51 +1,47 @@
 extern crate jupiter;
 
-use jupiter::provider::accuweather::Location;
-use jupiter::provider::accuweather::Forecast;
-use jupiter::provider::accuweather::CurrentCondition;
 use jupiter::provider::accuweather;
 use jupiter::provider::homebrew;
 use jupiter::provider::combo;
 use std::env;
+use tokio::signal;
 
 // store application version as a const
 const VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
 
 
 #[tokio::main]
-async fn main() {
-    println!("Hello, world!");
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logger
+    simple_logger::init_with_level(log::Level::Info).unwrap_or_else(|e| {
+        eprintln!("Failed to initialize logger: {}", e);
+    });
 
-    let accu_key = env::var("ACCUWEATHERKEY").expect("$ACCUWEATHERKEY is not set");
-    let zip_code = env::var("ZIP_CODE").expect("$ZIP_CODE is not set");
+    log::info!("Starting Jupiter Weather Server v{}", VERSION.unwrap_or("unknown"));
 
-    // Acuweather example
+    // Load environment variables with proper error handling
+    let accu_key = env::var("ACCUWEATHERKEY")
+        .map_err(|_| "Environment variable ACCUWEATHERKEY is not set")?;
+    let zip_code = env::var("ZIP_CODE")
+        .map_err(|_| "Environment variable ZIP_CODE is not set")?;
+
+    // Acuweather configuration
     let accuweather_config = accuweather::Config{
         apikey: String::from(accu_key.clone()),
         language: None,
         details: None,
         metric: None
     };
-    // let location = Location::search_by_zip(accuweather_config.clone(), String::from("24171")).unwrap();
-    // let forecast = Forecast::get_daily(accuweather_config.clone(), location.clone());
-    // let current = CurrentCondition::get(accuweather_config.clone(), location.clone());
-    // println!("{:?}", forecast);
-    // println!("{:?}", current);
 
-
-    // Homebrew Weather Server Example
-    // curl -X GET "http://localhost:8080/" -H "Authorization: xxx"
-    // curl -X POST "http://localhost:8080/api/weather_reports" -H "Authorization: xxx" -d "device_type=outdoor&temperature=32&humidity=50&pm25=2&pm10=3&percipitation=4&tvoc=10&co2=400"
+    // Homebrew Weather Server configuration
     let pg = homebrew::PostgresServer::new();
     let homebrew_config = homebrew::Config{
         apikey: String::from(accu_key.clone()),
         port: 9090,
         pg: pg
     };
-    // homebrew_config.clone().init().await;
 
-
-    // Combo example
+    // Combo server configuration
     let pg = combo::PostgresServer::new();
     let config = combo::Config{
         apikey: String::from(accu_key.clone()),
@@ -56,7 +52,48 @@ async fn main() {
         homebrew_config: Some(homebrew_config),
         zip_code: String::from(zip_code)
     };
-    config.init().await;
 
-    loop{}
+    // Initialize the server
+    log::info!("Initializing combo server on port {}", config.port);
+    config.init().await;
+    log::info!("Server successfully initialized and listening on port {}", config.port);
+
+    // Wait for shutdown signal
+    shutdown_signal().await;
+    
+    log::info!("Shutdown signal received, gracefully shutting down...");
+    
+    // Give the server threads a moment to finish current requests
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    
+    log::info!("Server shutdown complete");
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        signal::unix::signal(signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            log::info!("Received Ctrl+C signal");
+        },
+        _ = terminate => {
+            log::info!("Received SIGTERM signal");
+        },
+    }
 }

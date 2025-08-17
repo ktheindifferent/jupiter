@@ -1,6 +1,32 @@
 ## Jupiter Weather Server
 A rust-y weather server designed by the Open Sam Foundation and PixelCoda.
 
+## Server Lifecycle and Management
+
+### Starting the Server
+The server requires two environment variables to be set:
+- `ACCUWEATHERKEY`: Your AccuWeather API key
+- `ZIP_CODE`: The ZIP code for weather data
+
+```bash
+export ACCUWEATHERKEY="your_api_key"
+export ZIP_CODE="12345"
+cargo run
+```
+
+### Graceful Shutdown
+The server now supports graceful shutdown through signal handling:
+- **SIGTERM**: Gracefully stops the server (commonly used in production)
+- **SIGINT (Ctrl+C)**: Gracefully stops the server (commonly used during development)
+
+When a shutdown signal is received, the server will:
+1. Log the shutdown signal
+2. Allow 2 seconds for in-flight requests to complete
+3. Exit cleanly with status code 0
+
+### CPU Usage
+The infinite loop CPU exhaustion issue has been fixed. The server now uses proper async signal handling with tokio, ensuring minimal CPU usage while waiting for shutdown signals.
+
 ## Current Features
 * Partial AcuWeather API Support
     * Location API
