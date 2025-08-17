@@ -10,6 +10,7 @@
 // TODO - Combo API for averaging results between multiple providers and reducing paid API calls
 extern crate postgres;
 pub mod provider;
+pub mod auth;
 
 
 // https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude={part}&appid={API key}
