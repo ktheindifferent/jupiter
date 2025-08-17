@@ -82,7 +82,14 @@ impl Config {
                             }
                             if request.method() == "GET" {
                                 let objects = crate::provider::homebrew::WeatherReport::select(cfg.clone(), Some(1), None, Some(format!("timestamp DESC")), None).unwrap();
-                                return Response::json(&objects[0].clone());
+                                
+                                // Check if we have any results before accessing
+                                if let Some(first) = objects.first() {
+                                    return Response::json(&first.clone());
+                                } else {
+                                    eprintln!("[combo/homebrew] Warning: No weather data found in homebrew database");
+                                    return Response::text("No homebrew weather data available").with_status_code(404);
+                                }
                             }
                         }
                     },
@@ -98,12 +105,16 @@ impl Config {
                     match config.cache_timeout.clone(){
                         Some(timeout) => {
                             let objects = CachedWeatherData::select(config.clone(), Some(1), None, Some(format!("timestamp DESC")), None).unwrap();
-                            if objects.len() > 0 {
+                            
+                            // Use safe array access with .first()
+                            if let Some(first) = objects.first() {
                                 let current_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-                                let x = current_timestamp - objects[0].timestamp;
+                                let x = current_timestamp - first.timestamp;
                                 if x < timeout {
-                                    return Response::json(&objects[0].clone());
+                                    return Response::json(&first.clone());
                                 }
+                            } else {
+                                eprintln!("[combo] Warning: No cached weather data found in database");
                             }
                         },
                         None => {}
@@ -113,10 +124,30 @@ impl Config {
 
                     match config.accu_config.clone(){
                         Some(cfg) => {
-                            let location = crate::provider::accuweather::Location::search_by_zip(cfg.clone(), config.zip_code.clone()).unwrap();
-                            let current = crate::provider::accuweather::CurrentCondition::get(cfg, location.clone()).unwrap();
-                            let j = serde_json::to_string(&current).unwrap();
-                            resp.accuweather = Some(j);
+                            // Handle Option return from search_by_zip
+                            match crate::provider::accuweather::Location::search_by_zip(cfg.clone(), config.zip_code.clone()) {
+                                Ok(Some(location)) => {
+                                    // Handle Option return from get
+                                    match crate::provider::accuweather::CurrentCondition::get(cfg, location.clone()) {
+                                        Ok(Some(current)) => {
+                                            let j = serde_json::to_string(&current).unwrap();
+                                            resp.accuweather = Some(j);
+                                        },
+                                        Ok(None) => {
+                                            eprintln!("[combo] No current conditions available from AccuWeather");
+                                        },
+                                        Err(e) => {
+                                            eprintln!("[combo] Error fetching current conditions from AccuWeather: {}", e);
+                                        }
+                                    }
+                                },
+                                Ok(None) => {
+                                    eprintln!("[combo] No location found for zip code: {}", config.zip_code);
+                                },
+                                Err(e) => {
+                                    eprintln!("[combo] Error searching location by zip: {}", e);
+                                }
+                            }
                         },
                         None => {}
                     }
@@ -126,8 +157,14 @@ impl Config {
                         Some(cfg) => {
                             let objects = crate::provider::homebrew::WeatherReport::select(cfg.clone(), Some(1), None, Some(format!("timestamp DESC")), None).unwrap();
                             
-                            let j = serde_json::to_string(&objects[0].clone()).unwrap();
-                            resp.homebrew = Some(j);
+                            // Use safe array access to prevent panic on empty results
+                            if let Some(first) = objects.first() {
+                                let j = serde_json::to_string(&first.clone()).unwrap();
+                                resp.homebrew = Some(j);
+                            } else {
+                                eprintln!("[combo] Warning: No homebrew data available for caching");
+                            }
+                            // If no data, resp.homebrew remains None which is acceptable
                         },
                         None => {}
                     }

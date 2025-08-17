@@ -88,14 +88,23 @@ impl Location {
     // q: string
     // language: string
     // details: bool
-    pub fn search_by_zip(config: Config, q: String) -> Result<Location, reqwest::Error> {
+    pub fn search_by_zip(config: Config, q: String) -> Result<Option<Location>, reqwest::Error> {
         let url = format!("http://dataservice.accuweather.com/locations/v1/postalcodes/search{}&q={}", config.to_params(), q);
 
         let request = reqwest::blocking::Client::new().get(url).send();
         match request {
             Ok(req) => {
                 let json = req.json::<Locations>()?;
-                return Ok(json[0].clone());
+                
+                // Check if we have any locations before accessing
+                if let Some(first) = json.first() {
+                    return Ok(Some(first.clone()));
+                } else {
+                    // Log empty result scenario
+                    eprintln!("[accuweather] Warning: No locations found for postal code: {}", q);
+                    // Return None to signal no data found
+                    return Ok(None);
+                }
             },
             Err(err) => {
                 return Err(err);
@@ -170,14 +179,23 @@ impl CurrentCondition {
     // apikey: string
     // language: string
     // details: bool
-    pub fn get(config: Config, location: Location) -> Result<CurrentCondition, reqwest::Error> {
+    pub fn get(config: Config, location: Location) -> Result<Option<CurrentCondition>, reqwest::Error> {
         let mut url = format!("http://dataservice.accuweather.com/currentconditions/v1/{}{}", location.key, config.to_params());
 
         let request = reqwest::blocking::Client::new().get(url).send();
         match request {
             Ok(req) => {
                 let json = req.json::<CurrentConditions>()?;
-                return Ok(json[0].clone());
+                
+                // Check if we have any conditions before accessing
+                if let Some(first) = json.first() {
+                    return Ok(Some(first.clone()));
+                } else {
+                    // Log empty result scenario
+                    eprintln!("[accuweather] Warning: No current conditions found for location: {}", location.key);
+                    // Return None to signal no data found
+                    return Ok(None);
+                }
             },
             Err(err) => {
                 return Err(err);
