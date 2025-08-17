@@ -82,7 +82,16 @@ impl Config {
                     }
                     if request.method() == "GET" {
                         let objects = WeatherReport::select(config.clone(), Some(1), None, Some(format!("timestamp DESC")), None).unwrap();
-                        return Response::json(&objects[0].clone());
+                        
+                        // Check if we have any results before accessing
+                        if let Some(first) = objects.first() {
+                            return Response::json(&first.clone());
+                        } else {
+                            // Log empty result scenario
+                            eprintln!("[homebrew] Warning: No weather data found in database for GET request");
+                            // Return a proper error response when no data is available
+                            return Response::text("No weather data available").with_status_code(404);
+                        }
                     }
                 }
     
