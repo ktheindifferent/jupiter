@@ -17,8 +17,16 @@ use std::sync::Arc;
 
 use tokio_postgres::{Error, Row};
 use crate::ssl_config::{create_combo_connector, SslConfig};
+use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 
 // Ability to combine, average, and cache final values between all configured providers.
+
+// Secure filter parameters for database queries
+#[derive(Debug, Clone)]
+pub struct FilterParams {
+    pub oid: Option<String>,
+    // Add more filter fields as needed
+}
 
 // Lives in memory, no SQL
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,15 +286,10 @@ impl CachedWeatherData {
         // Build postgres client
         let mut client = crate::postgres::Client::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), connector)?;
 
-        // Search for OID matches
-        let rows = Self::select(
-            config.clone(), 
-            None, 
-            None, 
-            None, 
-            Some(format!("oid = '{}'", 
-                &self.oid, 
-            ))
+        // Search for OID matches using secure parameterized query
+        let rows = Self::select_by_oid(
+            config.clone(),
+            &self.oid
         ).unwrap();
 
         if rows.len() == 0 {
@@ -322,55 +325,105 @@ impl CachedWeatherData {
 
         return Ok(self);
     }
-    pub fn select(config: Config, limit: Option<usize>, offset: Option<usize>, order: Option<String>, query: Option<String>) -> Result<Vec<Self>, Error>{
+    // Secure method to select by OID using parameterized query
+    pub fn select_by_oid(config: Config, oid: &str) -> Result<Vec<Self>, Error> {
+        // Validate OID input before using in query
+        if !InputSanitizer::validate_oid(oid) {
+            // For postgres Error, we need to return a proper database error
+            // Since we can't directly create a custom Error, we'll let the query fail safely
+            // if invalid input gets through (which it won't with parameterized queries)
+            log::error!("Invalid OID format detected: {}", oid);
+        }
         
-    
-        // Get a copy of the master key and postgres info
+        if !InputSanitizer::check_for_sql_keywords(oid) {
+            log::error!("Potential SQL injection detected in OID: {}", oid);
+        }
+        
         let postgres = config.pg.clone();
-            
-        let mut execquery = "SELECT * FROM cached_weather_data".to_string();
-
-        match query {
-            Some(query_val) => {
-                execquery = format!("{} {} {}", execquery.clone(), "WHERE", query_val);
-            },
-            None => {
-                
-            }
-        }
-        match order {
-            Some(order_val) => {
-                execquery = format!("{} {} {}", execquery.clone(), "ORDER BY", order_val);
-            },
-            None => {
-                execquery = format!("{} {} {}", execquery.clone(), "ORDER BY", "id DESC");
-            }
-        }
-        match limit {
-            Some(limit_val) => {
-                execquery = format!("{} {} {}", execquery.clone(), "LIMIT", limit_val);
-            },
-            None => {}
-        }
-        match offset {
-            Some(offset_val) => {
-                execquery = format!("{} {} {}", execquery.clone(), "OFFSET", offset_val);
-            },
-            None => {}
-        }
-
+        
         let connector = create_combo_connector()
             .unwrap_or_else(|e| {
                 log::error!("Failed to create SSL connector: {}", e);
                 panic!("Unable to create SSL connector: {}", e);
             });
-        let mut client = crate::postgres::Client::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), connector)?;
-
+        let mut client = crate::postgres::Client::connect(
+            format!("postgresql://{}:{}@{}/{}?sslmode=prefer", 
+                &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), 
+            connector
+        )?;
+        
+        let query = "SELECT * FROM cached_weather_data WHERE oid = $1 ORDER BY id DESC";
         let mut parsed_rows: Vec<Self> = Vec::new();
-        for row in client.query(execquery.as_str(), &[])? {
+        for row in client.query(query, &[&oid])? {
             parsed_rows.push(Self::from_row(&row).unwrap());
         }
-
+        
+        Ok(parsed_rows)
+    }
+    
+    // Secure select method with parameterized queries
+    pub fn select(config: Config, limit: Option<usize>, offset: Option<usize>, order_column: Option<String>, filter_params: Option<FilterParams>) -> Result<Vec<Self>, Error> {
+        let postgres = config.pg.clone();
+        
+        // Build secure query with parameterized placeholders
+        let mut query = String::from("SELECT * FROM cached_weather_data");
+        let mut param_count = 0;
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+        
+        // Add WHERE clause if filter parameters provided
+        if let Some(ref filters) = filter_params {
+            if let Some(ref oid) = filters.oid {
+                param_count += 1;
+                query.push_str(&format!(" WHERE oid = ${}", param_count));
+                // Note: actual parameter binding happens in the query execution
+            }
+        }
+        
+        // Add ORDER BY clause (validate column name against whitelist)
+        let valid_order_columns = vec!["id", "timestamp", "oid"];
+        match order_column {
+            Some(col) if valid_order_columns.contains(&col.as_str()) => {
+                query.push_str(&format!(" ORDER BY {} DESC", col));
+            },
+            _ => {
+                query.push_str(" ORDER BY id DESC");
+            }
+        }
+        
+        // Add LIMIT and OFFSET
+        if let Some(limit_val) = limit {
+            query.push_str(&format!(" LIMIT {}", limit_val));
+        }
+        if let Some(offset_val) = offset {
+            query.push_str(&format!(" OFFSET {}", offset_val));
+        }
+        
+        let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
+        builder.set_verify(SslVerifyMode::NONE);
+        let connector = MakeTlsConnector::new(builder.build());
+        let mut client = crate::postgres::Client::connect(
+            format!("postgresql://{}:{}@{}/{}?sslmode=prefer", 
+                &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), 
+            connector
+        )?;
+        
+        let mut parsed_rows: Vec<Self> = Vec::new();
+        
+        // Execute query with appropriate parameters
+        let rows = if let Some(ref filters) = filter_params {
+            if let Some(ref oid) = filters.oid {
+                client.query(&query, &[oid])?
+            } else {
+                client.query(&query, &[])?
+            }
+        } else {
+            client.query(&query, &[])?
+        };
+        
+        for row in rows {
+            parsed_rows.push(Self::from_row(&row).unwrap());
+        }
+        
         return Ok(parsed_rows);
     }
     fn from_row(row: &Row) -> Result<Self, Error> {

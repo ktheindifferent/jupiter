@@ -12,9 +12,12 @@ extern crate postgres;
 pub mod provider;
 pub mod auth;
 pub mod ssl_config;
+pub mod input_sanitizer;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod security_tests;
 
 
 // https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude={part}&appid={API key}
