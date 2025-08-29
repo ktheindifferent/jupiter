@@ -16,7 +16,10 @@ use crate::auth::{validate_auth_header, RateLimiter};
 use std::sync::Arc;
 
 use tokio_postgres::{Error, Row};
+use crate::error::{JupiterError, Result as JupiterResult};
 use crate::ssl_config::{create_homebrew_connector, SslConfig};
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use postgres_openssl::MakeTlsConnector;
 use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 use crate::config::{DatabaseConfig, ConfigError};
 
@@ -45,9 +48,9 @@ pub struct Config {
     pub port: u16
 }
 impl Config {
-    pub async fn init(&self){
+    pub async fn init(&self) -> JupiterResult<()> {
 
-        self.build_tables().await;
+        self.build_tables().await?;
 
         let config = self.clone();
         thread::spawn(move || {
@@ -89,7 +92,13 @@ impl Config {
                         return Response::json(&obj);
                     }
                     if request.method() == "GET" {
-                        let objects = WeatherReport::select(config.clone(), Some(1), None, Some(format!("timestamp DESC")), None).unwrap();
+                        let objects = match WeatherReport::select(config.clone(), Some(1), None, Some(format!("timestamp DESC")), None) {
+                            Ok(objs) => objs,
+                            Err(e) => {
+                                log::error!("Failed to select weather reports: {}", e);
+                                return Response::text("Database error").with_status_code(500);
+                            }
+                        };
                         
                         // Check if we have any results before accessing
                         if let Some(first) = objects.first() {
@@ -109,16 +118,17 @@ impl Config {
                 return response;
             });
         });
+        Ok(())
     }
 
-    pub async fn build_tables(&self) -> Result<(), Error>{
+    pub async fn build_tables(&self) -> JupiterResult<()> {
     
         // Use centralized SSL configuration
         let connector = create_homebrew_connector()
-            .unwrap_or_else(|e| {
+            .map_err(|e| {
                 log::error!("Failed to create SSL connector: {}", e);
-                panic!("Unable to create SSL connector: {}", e);
-            });
+                JupiterError::SslError(format!("Unable to create SSL connector: {}", e))
+            })?;
     
         let (client, connection) = tokio_postgres::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &self.pg.username, &self.pg.password, &self.pg.address, &self.pg.db_name).as_str(), connector).await?;
         
@@ -169,7 +179,12 @@ pub struct WeatherReport {
 impl WeatherReport {
     pub fn new() -> WeatherReport {
         let oid: String = thread_rng().sample_iter(&Alphanumeric).take(15).map(char::from).collect();
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|e| {
+                log::error!("System time error: {}", e);
+                std::time::Duration::from_secs(0)
+            })
+            .as_secs() as i64;
 
         WeatherReport { 
             id: 0,
@@ -208,16 +223,16 @@ impl WeatherReport {
             "",
         ]
     }
-    pub fn save(&self, config: Config) -> Result<&Self, Error>{
+    pub fn save(&self, config: Config) -> JupiterResult<&Self> {
         // Get a copy of the master key and postgres info
         let postgres = config.pg.clone();
 
         // Build SQL adapter with proper SSL verification
         let connector = create_homebrew_connector()
-            .unwrap_or_else(|e| {
+            .map_err(|e| {
                 log::error!("Failed to create SSL connector: {}", e);
-                panic!("Unable to create SSL connector: {}", e);
-            });
+                JupiterError::SslError(format!("Unable to create SSL connector: {}", e))
+            })?;
 
         // Build postgres client
         let mut client = crate::postgres::Client::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), connector)?;
@@ -226,20 +241,20 @@ impl WeatherReport {
         let rows = Self::select_by_oid(
             config.clone(),
             &self.oid
-        ).unwrap();
+        )?;
 
         if rows.len() == 0 {
             client.execute("INSERT INTO weather_reports (oid, device_type, timestamp) VALUES ($1, $2, $3)",
                 &[&self.oid.clone(),
                 &self.device_type,
                 &self.timestamp]
-            ).unwrap();
+            )?;
         } 
 
         if self.temperature.is_some() {
             client.execute("UPDATE weather_reports SET temperature = $1 WHERE oid = $2;", 
             &[
-                &self.temperature.clone().unwrap(),
+                &self.temperature,
                 &self.oid
             ])?;
         }
@@ -247,7 +262,7 @@ impl WeatherReport {
         if self.humidity.is_some() {
             client.execute("UPDATE weather_reports SET humidity = $1 WHERE oid = $2;", 
             &[
-                &self.humidity.clone().unwrap(),
+                &self.humidity,
                 &self.oid
             ])?;
         }
@@ -255,7 +270,7 @@ impl WeatherReport {
         if self.percipitation.is_some() {
             client.execute("UPDATE weather_reports SET percipitation = $1 WHERE oid = $2;", 
             &[
-                &self.percipitation.clone().unwrap(),
+                &self.percipitation,
                 &self.oid
             ])?;
         }
@@ -263,7 +278,7 @@ impl WeatherReport {
         if self.pm10.is_some() {
             client.execute("UPDATE weather_reports SET pm10 = $1 WHERE oid = $2;", 
             &[
-                &self.pm10.clone().unwrap(),
+                &self.pm10,
                 &self.oid
             ])?;
         }
@@ -271,7 +286,7 @@ impl WeatherReport {
         if self.pm25.is_some() {
             client.execute("UPDATE weather_reports SET pm25 = $1 WHERE oid = $2;", 
             &[
-                &self.pm25.clone().unwrap(),
+                &self.pm25,
                 &self.oid
             ])?;
         }
@@ -279,7 +294,7 @@ impl WeatherReport {
         if self.co2.is_some() {
             client.execute("UPDATE weather_reports SET co2 = $1 WHERE oid = $2;", 
             &[
-                &self.co2.clone().unwrap(),
+                &self.co2,
                 &self.oid
             ])?;
         }
@@ -287,7 +302,7 @@ impl WeatherReport {
         if self.tvoc.is_some() {
             client.execute("UPDATE weather_reports SET tvoc = $1 WHERE oid = $2;", 
             &[
-                &self.tvoc.clone().unwrap(),
+                &self.tvoc,
                 &self.oid
             ])?;
         }
@@ -295,7 +310,7 @@ impl WeatherReport {
         return Ok(self);
     }
     // Secure method to select by OID using parameterized query
-    pub fn select_by_oid(config: Config, oid: &str) -> Result<Vec<Self>, Error> {
+    pub fn select_by_oid(config: Config, oid: &str) -> JupiterResult<Vec<Self>> {
         // Validate OID input before using in query
         if !InputSanitizer::validate_oid(oid) {
             // For postgres Error, we need to return a proper database error
@@ -311,10 +326,10 @@ impl WeatherReport {
         let postgres = config.pg.clone();
         
         let connector = create_homebrew_connector()
-            .unwrap_or_else(|e| {
+            .map_err(|e| {
                 log::error!("Failed to create SSL connector: {}", e);
-                panic!("Unable to create SSL connector: {}", e);
-            });
+                JupiterError::SslError(format!("Unable to create SSL connector: {}", e))
+            })?;
         let mut client = crate::postgres::Client::connect(
             format!("postgresql://{}:{}@{}/{}?sslmode=prefer", 
                 &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), 
@@ -324,14 +339,14 @@ impl WeatherReport {
         let query = "SELECT * FROM weather_reports WHERE oid = $1 ORDER BY id DESC";
         let mut parsed_rows: Vec<Self> = Vec::new();
         for row in client.query(query, &[&oid])? {
-            parsed_rows.push(Self::from_row(&row).unwrap());
+            parsed_rows.push(Self::from_row(&row)?);
         }
         
         Ok(parsed_rows)
     }
     
     // Secure select method with parameterized queries
-    pub fn select(config: Config, limit: Option<usize>, offset: Option<usize>, order_column: Option<String>, filter_params: Option<FilterParams>) -> Result<Vec<Self>, Error> {
+    pub fn select(config: Config, limit: Option<usize>, offset: Option<usize>, order_column: Option<String>, filter_params: Option<FilterParams>) -> JupiterResult<Vec<Self>> {
         let postgres = config.pg.clone();
         
         // Build secure query with parameterized placeholders
@@ -368,7 +383,7 @@ impl WeatherReport {
         }
         
         let connector = create_homebrew_connector()
-            .expect("Failed to create SSL connector");
+            .map_err(|e| JupiterError::SslError(format!("Failed to create SSL connector: {}", e)))?
         let mut client = crate::postgres::Client::connect(
             format!("postgresql://{}:{}@{}/{}?sslmode=prefer", 
                 &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), 
@@ -389,12 +404,12 @@ impl WeatherReport {
         };
         
         for row in rows {
-            parsed_rows.push(Self::from_row(&row).unwrap());
+            parsed_rows.push(Self::from_row(&row)?);
         }
 
         return Ok(parsed_rows);
     }
-    fn from_row(row: &Row) -> Result<Self, Error> {
+    fn from_row(row: &Row) -> JupiterResult<Self> {
         return Ok(Self {
             id: row.get("id"),
             oid: row.get("oid"),
@@ -438,5 +453,6 @@ impl PostgresServer {
             password: config.password.clone(),
             address: config.address.clone(),
         }
+
     }
 }
