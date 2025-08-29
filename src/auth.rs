@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use crate::error::{JupiterError, Result as JupiterResult};
 
 /// Performs constant-time comparison of two byte slices to prevent timing attacks
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -35,7 +36,14 @@ impl RateLimiter {
     }
 
     pub fn check_rate_limit(&self, client_id: &str) -> bool {
-        let mut attempts = self.attempts.lock().unwrap();
+        let mut attempts = match self.attempts.lock() {
+            Ok(lock) => lock,
+            Err(e) => {
+                log::error!("Failed to acquire rate limiter lock: {}", e);
+                // In case of lock poisoning, allow the request through
+                return true;
+            }
+        };
         let now = Instant::now();
         
         // Get or create the attempt list for this client
