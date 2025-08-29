@@ -14,13 +14,16 @@ use rouille::try_or_400;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::auth::{validate_auth_header, RateLimiter};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
+use tokio::sync::broadcast;
 
 use tokio_postgres::{Error, Row};
 use crate::error::{JupiterError, Result as JupiterResult};
 use crate::ssl_config::{create_homebrew_connector, SslConfig};
+use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 use crate::db_pool::{DatabasePool, DatabaseConfig, init_homebrew_pool, get_homebrew_pool};
 use crate::config::{ConfigError};
 
@@ -42,14 +45,42 @@ pub struct FilterParams {
     // Add more filter fields as needed
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     pub apikey: String,
     pub pg: PostgresServer,
-    pub port: u16
+    pub port: u16,
+    #[serde(skip)]
+    pub server_handle: Option<Arc<std::sync::Mutex<Option<JoinHandle<()>>>>>,
+    #[serde(skip)]
+    pub shutdown_flag: Arc<AtomicBool>,
+    #[serde(skip)]
+    pub shutdown_tx: Option<broadcast::Sender<()>>
 }
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("apikey", &self.apikey)
+            .field("pg", &self.pg)
+            .field("port", &self.port)
+            .finish()
+    }
+}
+
 impl Config {
-    pub async fn init(&self) -> JupiterResult<()> {
+    pub fn new(apikey: String, pg: PostgresServer, port: u16) -> Self {
+        let (shutdown_tx, _) = broadcast::channel(1);
+        Config {
+            apikey,
+            pg,
+            port,
+            server_handle: Some(Arc::new(std::sync::Mutex::new(None))),
+            shutdown_flag: Arc::new(AtomicBool::new(false)),
+            shutdown_tx: Some(shutdown_tx),
+        }
+    }
+
+    pub async fn init(&mut self) -> JupiterResult<()> {
         // Initialize connection pool
         let db_config = DatabaseConfig {
             db_name: self.pg.db_name.clone(),
@@ -80,11 +111,15 @@ impl Config {
         self.build_tables().await?;
 
         let config = self.clone();
-        thread::spawn(move || {
+        let shutdown_flag = self.shutdown_flag.clone();
+        let _shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let server_port = config.port;
+        
+        let handle = thread::spawn(move || {
             // Create rate limiter: max 10 attempts per minute per IP
             let rate_limiter = Arc::new(RateLimiter::new(10, 60));
             
-            rouille::start_server(format!("0.0.0.0:{}", config.port).as_str(), move |request| {
+            let server = rouille::Server::new(format!("0.0.0.0:{}", server_port).as_str(), move |request| {
     
                 // Validate authentication with rate limiting
                 if let Err(response) = validate_auth_header(request, &config.apikey, Some(&rate_limiter)) {
@@ -143,9 +178,70 @@ impl Config {
                 let mut response = Response::text("hello world");
 
                 return response;
-            });
+            }).expect("Failed to create server");
+            
+            log::info!("Homebrew server started on port {}", server_port);
+            
+            // Run server with shutdown support
+            while !shutdown_flag.load(Ordering::Relaxed) {
+                server.poll_timeout(std::time::Duration::from_millis(100));
+            }
+            
+            log::info!("Homebrew server shutting down...");
         });
+        
+        if let Some(handle_mutex) = &self.server_handle {
+            let mut handle_guard = handle_mutex.lock().unwrap();
+            *handle_guard = Some(handle);
+        }
+        
         Ok(())
+    }
+
+    pub async fn shutdown(&mut self) {
+        self.shutdown_with_timeout(std::time::Duration::from_secs(10)).await;
+    }
+
+    pub async fn shutdown_with_timeout(&mut self, timeout: std::time::Duration) {
+        log::info!("Initiating graceful shutdown of homebrew server...");
+        
+        // Signal the server thread to stop
+        self.shutdown_flag.store(true, Ordering::Relaxed);
+        
+        // Send shutdown signal via broadcast channel
+        if let Some(tx) = &self.shutdown_tx {
+            let _ = tx.send(());
+        }
+        
+        // Wait for the server thread to finish with timeout
+        if let Some(handle_mutex) = &self.server_handle {
+            let handle_mutex_clone = handle_mutex.clone();
+            
+            // Try to join with timeout
+            let join_result = tokio::time::timeout(timeout, async move {
+                let mut handle_guard = handle_mutex_clone.lock().unwrap();
+                if let Some(handle) = handle_guard.take() {
+                    // Since we can't directly join std::thread in async context,
+                    // we'll use a different approach
+                    let _ = tokio::task::spawn_blocking(move || {
+                        handle.join()
+                    }).await;
+                }
+            }).await;
+            
+            match join_result {
+                Ok(_) => log::info!("Homebrew server thread joined successfully"),
+                Err(_) => {
+                    log::warn!("Homebrew server shutdown timed out after {:?}", timeout);
+                    // Force cleanup if needed
+                    if let Ok(mut handle_guard) = handle_mutex.lock() {
+                        handle_guard.take(); // Drop the handle
+                    }
+                }
+            }
+        }
+        
+        log::info!("Homebrew server shutdown complete");
     }
 
     pub async fn build_tables(&self) -> JupiterResult<()> {
