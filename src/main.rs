@@ -35,23 +35,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Homebrew Weather Server configuration
     let pg = homebrew::PostgresServer::new();
-    let homebrew_config = homebrew::Config{
-        apikey: String::from(accu_key.clone()),
-        port: 9090,
-        pg: pg
-    };
+    let mut homebrew_config = homebrew::Config::new(
+        String::from(accu_key.clone()),
+        pg,
+        9090
+    );
 
     // Combo server configuration
     let pg = combo::PostgresServer::new();
-    let config = combo::Config{
-        apikey: String::from(accu_key.clone()),
-        port: 9091,
-        pg: pg,
-        cache_timeout: Some(3600),
-        accu_config: Some(accuweather_config),
-        homebrew_config: Some(homebrew_config),
-        zip_code: String::from(zip_code)
-    };
+    let mut config = combo::Config::new(
+        Some(accuweather_config),
+        Some(homebrew_config.clone()),
+        String::from(accu_key.clone()),
+        Some(3600),
+        pg,
+        9091,
+        String::from(zip_code)
+    );
 
     // Initialize the server
     log::info!("Initializing combo server on port {}", config.port);
@@ -63,8 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     log::info!("Shutdown signal received, gracefully shutting down...");
     
-    // Give the server threads a moment to finish current requests
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    // Shutdown all servers gracefully
+    config.shutdown().await;
     
     log::info!("Server shutdown complete");
     Ok(())
@@ -85,15 +85,29 @@ async fn shutdown_signal() {
             .await;
     };
 
+    #[cfg(unix)]
+    let hangup = async {
+        signal::unix::signal(signal::unix::SignalKind::hangup())
+            .expect("failed to install SIGHUP handler")
+            .recv()
+            .await;
+    };
+
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
+    
+    #[cfg(not(unix))]
+    let hangup = std::future::pending::<()>();
 
     tokio::select! {
         _ = ctrl_c => {
-            log::info!("Received Ctrl+C signal");
+            log::info!("Received Ctrl+C (SIGINT) signal");
         },
         _ = terminate => {
             log::info!("Received SIGTERM signal");
+        },
+        _ = hangup => {
+            log::info!("Received SIGHUP signal");
         },
     }
 }
