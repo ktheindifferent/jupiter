@@ -3,7 +3,10 @@ extern crate jupiter;
 use jupiter::provider::accuweather;
 use jupiter::provider::homebrew;
 use jupiter::provider::combo;
+use jupiter::db_pool;
+use jupiter::pool_monitor;
 use jupiter::config::Config;
+use std::env;
 use tokio::signal;
 
 // store application version as a const
@@ -66,7 +69,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::info!("Initializing combo server on port {}", config.port);
         config.init().await
             .map_err(|e| format!("Failed to initialize server: {}", e))?;
+        
+        // Initialize pool monitors
+        pool_monitor::init_monitors().await;
+        
+        // Start monitoring task (check every 30 seconds)
+        pool_monitor::start_monitoring_task(30).await;
+        
         log::info!("Server successfully initialized and listening on port {}", config.port);
+        log::info!("Pool metrics available at http://localhost:{}/metrics", config.port);
     } else {
         log::error!("Combo database configuration not found - cannot start server");
         return Err("At least one database configuration (combo or homebrew) must be provided".into());
@@ -76,6 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     shutdown_signal().await;
     
     log::info!("Shutdown signal received, gracefully shutting down...");
+    
+    // Shutdown database connection pools
+    db_pool::shutdown_pools().await;
     
     // Give the server threads a moment to finish current requests
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
