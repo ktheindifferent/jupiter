@@ -3,16 +3,50 @@ A rust-y weather server designed by the Open Sam Foundation and PixelCoda.
 
 ## Server Lifecycle and Management
 
-### Starting the Server
-The server requires two environment variables to be set:
-- `ACCUWEATHERKEY`: Your AccuWeather API key
-- `ZIP_CODE`: The ZIP code for weather data
+### Configuration
 
+The server uses environment variables for configuration. You can set them directly or use a `.env` file for local development.
+
+#### Required Environment Variables
+- `ACCUWEATHERKEY`: Your AccuWeather API key
+- `ZIP_CODE`: The ZIP code for weather data (5-digit US ZIP code)
+
+#### Optional Database Configuration
+At least one database configuration must be provided:
+
+**Homebrew Database** (for homebrew weather monitoring):
+- `HOMEBREW_PG_DBNAME`: Database name
+- `HOMEBREW_PG_USER`: Database username
+- `HOMEBREW_PG_PASS`: Database password
+- `HOMEBREW_PG_ADDRESS`: Database address (defaults to `localhost:5432`)
+
+**Combo Database** (for combo weather provider):
+- `COMBO_PG_DBNAME`: Database name
+- `COMBO_PG_USER`: Database username
+- `COMBO_PG_PASS`: Database password
+- `COMBO_PG_ADDRESS`: Database address (defaults to `localhost:5432`)
+
+### Starting the Server
+
+#### Using environment variables:
 ```bash
 export ACCUWEATHERKEY="your_api_key"
 export ZIP_CODE="12345"
+export COMBO_PG_DBNAME="combo_weather"
+export COMBO_PG_USER="combo_user"
+export COMBO_PG_PASS="secure_password"
 cargo run
 ```
+
+#### Using .env file (recommended for development):
+1. Copy `.env.example` to `.env`
+2. Fill in your configuration values
+3. Run the server:
+```bash
+cargo run
+```
+
+The server will automatically load the `.env` file if present, with environment variables taking precedence.
 
 ### Graceful Shutdown
 The server now supports graceful shutdown through signal handling:

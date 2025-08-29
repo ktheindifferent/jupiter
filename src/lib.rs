@@ -13,6 +13,7 @@ pub mod provider;
 pub mod auth;
 pub mod ssl_config;
 pub mod input_sanitizer;
+pub mod config;
 
 #[cfg(test)]
 mod tests;
