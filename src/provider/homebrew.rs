@@ -16,9 +16,13 @@ use crate::auth::{validate_auth_header, RateLimiter};
 use std::sync::Arc;
 
 use tokio_postgres::{Error, Row};
+use crate::error::{JupiterError, Result as JupiterResult};
 use crate::ssl_config::{create_homebrew_connector, SslConfig};
+use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+use postgres_openssl::MakeTlsConnector;
 use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 use crate::db_pool::{DatabasePool, DatabaseConfig, init_homebrew_pool, get_homebrew_pool};
+use crate::config::{ConfigError};
 
 // Can have multiple homebrew instruments
 // Support temperature humidity, windspeed, wind direction, percipitation, PM2.5, PM10, C02, TVOC, etc.
@@ -45,7 +49,7 @@ pub struct Config {
     pub port: u16
 }
 impl Config {
-    pub async fn init(&self){
+    pub async fn init(&self) -> JupiterResult<()> {
         // Initialize connection pool
         let db_config = DatabaseConfig {
             db_name: self.pg.db_name.clone(),
@@ -69,11 +73,11 @@ impl Config {
             },
             Err(e) => {
                 log::error!("[homebrew] Failed to initialize database connection pool: {}", e);
-                panic!("Unable to initialize database connection pool: {}", e);
+                return Err(JupiterError::Database(format!("Unable to initialize database connection pool: {}", e)));
             }
         }
 
-        self.build_tables().await;
+        self.build_tables().await?;
 
         let config = self.clone();
         thread::spawn(move || {
@@ -115,7 +119,13 @@ impl Config {
                         return Response::json(&obj);
                     }
                     if request.method() == "GET" {
-                        let objects = WeatherReport::select(config.clone(), Some(1), None, Some(format!("timestamp DESC")), None).unwrap();
+                        let objects = match WeatherReport::select(config.clone(), Some(1), None, Some(format!("timestamp DESC")), None) {
+                            Ok(objs) => objs,
+                            Err(e) => {
+                                log::error!("Failed to select weather reports: {}", e);
+                                return Response::text("Database error").with_status_code(500);
+                            }
+                        };
                         
                         // Check if we have any results before accessing
                         if let Some(first) = objects.first() {
@@ -135,15 +145,16 @@ impl Config {
                 return response;
             });
         });
+        Ok(())
     }
 
-    pub async fn build_tables(&self) -> Result<(), Error>{
+    pub async fn build_tables(&self) -> JupiterResult<()> {
         // Get connection from pool
         let pool = get_homebrew_pool()
-            .expect("Database pool not initialized");
+            .ok_or_else(|| JupiterError::Database("Database pool not initialized".to_string()))?;
         
         let client = pool.get_connection_with_retry(3).await
-            .expect("Failed to get database connection");
+            .map_err(|e| JupiterError::Database(format!("Failed to get database connection: {}", e)))?;
     
         // Build WeatherReport Table
         // ---------------------------------------------------------------
@@ -184,7 +195,12 @@ pub struct WeatherReport {
 impl WeatherReport {
     pub fn new() -> WeatherReport {
         let oid: String = thread_rng().sample_iter(&Alphanumeric).take(15).map(char::from).collect();
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)
+            .unwrap_or_else(|e| {
+                log::error!("System time error: {}", e);
+                std::time::Duration::from_secs(0)
+            })
+            .as_secs() as i64;
 
         WeatherReport { 
             id: 0,
@@ -223,6 +239,7 @@ impl WeatherReport {
             "",
         ]
     }
+<<<<<<< HEAD
     pub fn save(&self, config: Config) -> Result<&Self, Error>{
         // Use async runtime to get connection from pool
         let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -233,25 +250,44 @@ impl WeatherReport {
             pool.get_connection_with_retry(3).await
                 .expect("Failed to get database connection")
         });
+=======
+    pub fn save(&self, config: Config) -> JupiterResult<&Self> {
+        // Get a copy of the master key and postgres info
+        let postgres = config.pg.clone();
+
+        // Build SQL adapter with proper SSL verification
+        let connector = create_homebrew_connector()
+            .map_err(|e| {
+                log::error!("Failed to create SSL connector: {}", e);
+                JupiterError::SslError(format!("Unable to create SSL connector: {}", e))
+            })?;
+
+        // Build postgres client
+        let mut client = crate::postgres::Client::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), connector)?;
+>>>>>>> master
 
         // Search for OID matches using secure parameterized query
         let rows = Self::select_by_oid(
             config.clone(),
             &self.oid
-        ).unwrap();
+        )?;
 
         if rows.len() == 0 {
             runtime.block_on(client.execute("INSERT INTO weather_reports (oid, device_type, timestamp) VALUES ($1, $2, $3)",
                 &[&self.oid.clone(),
                 &self.device_type,
                 &self.timestamp]
+<<<<<<< HEAD
             )).unwrap();
+=======
+            )?;
+>>>>>>> master
         } 
 
         if self.temperature.is_some() {
             runtime.block_on(client.execute("UPDATE weather_reports SET temperature = $1 WHERE oid = $2;", 
             &[
-                &self.temperature.clone().unwrap(),
+                &self.temperature,
                 &self.oid
             ]))?;
         }
@@ -259,7 +295,7 @@ impl WeatherReport {
         if self.humidity.is_some() {
             runtime.block_on(client.execute("UPDATE weather_reports SET humidity = $1 WHERE oid = $2;", 
             &[
-                &self.humidity.clone().unwrap(),
+                &self.humidity,
                 &self.oid
             ]))?;
         }
@@ -267,7 +303,7 @@ impl WeatherReport {
         if self.percipitation.is_some() {
             runtime.block_on(client.execute("UPDATE weather_reports SET percipitation = $1 WHERE oid = $2;", 
             &[
-                &self.percipitation.clone().unwrap(),
+                &self.percipitation,
                 &self.oid
             ]))?;
         }
@@ -275,7 +311,7 @@ impl WeatherReport {
         if self.pm10.is_some() {
             runtime.block_on(client.execute("UPDATE weather_reports SET pm10 = $1 WHERE oid = $2;", 
             &[
-                &self.pm10.clone().unwrap(),
+                &self.pm10,
                 &self.oid
             ]))?;
         }
@@ -283,7 +319,7 @@ impl WeatherReport {
         if self.pm25.is_some() {
             runtime.block_on(client.execute("UPDATE weather_reports SET pm25 = $1 WHERE oid = $2;", 
             &[
-                &self.pm25.clone().unwrap(),
+                &self.pm25,
                 &self.oid
             ]))?;
         }
@@ -291,7 +327,7 @@ impl WeatherReport {
         if self.co2.is_some() {
             runtime.block_on(client.execute("UPDATE weather_reports SET co2 = $1 WHERE oid = $2;", 
             &[
-                &self.co2.clone().unwrap(),
+                &self.co2,
                 &self.oid
             ]))?;
         }
@@ -299,7 +335,7 @@ impl WeatherReport {
         if self.tvoc.is_some() {
             runtime.block_on(client.execute("UPDATE weather_reports SET tvoc = $1 WHERE oid = $2;", 
             &[
-                &self.tvoc.clone().unwrap(),
+                &self.tvoc,
                 &self.oid
             ]))?;
         }
@@ -307,7 +343,7 @@ impl WeatherReport {
         return Ok(self);
     }
     // Secure method to select by OID using parameterized query
-    pub fn select_by_oid(config: Config, oid: &str) -> Result<Vec<Self>, Error> {
+    pub fn select_by_oid(config: Config, oid: &str) -> JupiterResult<Vec<Self>> {
         // Validate OID input before using in query
         if !InputSanitizer::validate_oid(oid) {
             log::error!("Invalid OID format detected: {}", oid);
@@ -318,20 +354,23 @@ impl WeatherReport {
         }
         
         // Use async runtime to get connection from pool
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| JupiterError::Database(format!("Failed to create runtime: {}", e)))?;
         runtime.block_on(async {
             let pool = get_homebrew_pool()
-                .expect("Database pool not initialized");
+                .ok_or_else(|| JupiterError::Database("Database pool not initialized".to_string()))?;
             
             let client = pool.get_connection_with_retry(3).await
-                .expect("Failed to get database connection");
+                .map_err(|e| JupiterError::Database(format!("Failed to get database connection: {}", e)))?;
             
             let query = "SELECT * FROM weather_reports WHERE oid = $1 ORDER BY id DESC";
-            let rows = client.query(query, &[&oid]).await?;
+            let rows = client.query(query, &[&oid]).await
+                .map_err(|e| JupiterError::Database(format!("Query failed: {}", e)))?;
             
             let mut parsed_rows: Vec<Self> = Vec::new();
             for row in rows {
-                parsed_rows.push(Self::from_row(&row).unwrap());
+                parsed_rows.push(Self::from_row(&row)
+                    .map_err(|e| JupiterError::Database(format!("Failed to parse row: {}", e)))?);
             }
             
             Ok(parsed_rows)
@@ -339,7 +378,7 @@ impl WeatherReport {
     }
     
     // Secure select method with parameterized queries
-    pub fn select(config: Config, limit: Option<usize>, offset: Option<usize>, order_column: Option<String>, filter_params: Option<FilterParams>) -> Result<Vec<Self>, Error> {
+    pub fn select(config: Config, limit: Option<usize>, offset: Option<usize>, order_column: Option<String>, filter_params: Option<FilterParams>) -> JupiterResult<Vec<Self>> {
         // Build secure query with parameterized placeholders
         let mut query = String::from("SELECT * FROM weather_reports");
         let mut param_count = 0;
@@ -372,34 +411,39 @@ impl WeatherReport {
         }
         
         // Use async runtime to get connection from pool
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| JupiterError::Database(format!("Failed to create runtime: {}", e)))?;
         runtime.block_on(async {
             let pool = get_homebrew_pool()
-                .expect("Database pool not initialized");
+                .ok_or_else(|| JupiterError::Database("Database pool not initialized".to_string()))?;
             
             let client = pool.get_connection_with_retry(3).await
-                .expect("Failed to get database connection");
+                .map_err(|e| JupiterError::Database(format!("Failed to get database connection: {}", e)))?;
             
             // Execute query with appropriate parameters
             let rows = if let Some(ref filters) = filter_params {
                 if let Some(ref oid) = filters.oid {
-                    client.query(&query, &[oid]).await?
+                    client.query(&query, &[oid]).await
+                        .map_err(|e| JupiterError::Database(format!("Query failed: {}", e)))?
                 } else {
-                    client.query(&query, &[]).await?
+                    client.query(&query, &[]).await
+                        .map_err(|e| JupiterError::Database(format!("Query failed: {}", e)))?
                 }
             } else {
-                client.query(&query, &[]).await?
+                client.query(&query, &[]).await
+                    .map_err(|e| JupiterError::Database(format!("Query failed: {}", e)))?
             };
             
             let mut parsed_rows: Vec<Self> = Vec::new();
             for row in rows {
-                parsed_rows.push(Self::from_row(&row).unwrap());
+                parsed_rows.push(Self::from_row(&row)
+                    .map_err(|e| JupiterError::Database(format!("Failed to parse row: {}", e)))?);
             }
 
             Ok(parsed_rows)
         })
     }
-    fn from_row(row: &Row) -> Result<Self, Error> {
+    fn from_row(row: &Row) -> JupiterResult<Self> {
         return Ok(Self {
             id: row.get("id"),
             oid: row.get("oid"),
@@ -425,19 +469,24 @@ pub struct PostgresServer {
 	pub address: String
 }
 impl PostgresServer {
-    pub fn new() -> PostgresServer {
-
-        let db_name = env::var("HOMEBREW_PG_DBNAME").expect("$HOMEBREW_PG_DBNAME is not set");
-        let username = env::var("HOMEBREW_PG_USER").expect("$HOMEBREW_PG_USER is not set");
-        let password = env::var("HOMEBREW_PG_PASS").expect("$HOMEBREW_PG_PASS is not set");
-        let address = env::var("HOMEBREW_PG_ADDRESS").expect("$HOMEBREW_PG_ADDRESS is not set");
-
-
-        PostgresServer{
-            db_name, 
-            username, 
-            password, 
-            address
+    pub fn new() -> Result<PostgresServer, ConfigError> {
+        let config = DatabaseConfig::homebrew_from_env()?;
+        
+        Ok(PostgresServer {
+            db_name: config.db_name,
+            username: config.username,
+            password: config.password,
+            address: config.address,
+        })
+    }
+    
+    pub fn from_config(config: &DatabaseConfig) -> PostgresServer {
+        PostgresServer {
+            db_name: config.db_name.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            address: config.address.clone(),
         }
+
     }
 }

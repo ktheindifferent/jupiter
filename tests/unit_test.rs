@@ -59,17 +59,17 @@ async fn test_shutdown_signal_structure() {
     let handle = tokio::spawn(async {
         // Verify we can create the signal handler futures
         let _ctrl_c_future = async {
-            signal::ctrl_c()
-                .await
-                .expect("failed to install Ctrl+C handler");
+            if let Err(e) = signal::ctrl_c().await {
+                eprintln!("Failed to install Ctrl+C handler in test: {}", e);
+            }
         };
 
         #[cfg(unix)]
         let _terminate_future = async {
-            signal::unix::signal(signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler")
-                .recv()
-                .await;
+            match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => { signal.recv().await; },
+                Err(e) => { eprintln!("Failed to install SIGTERM handler in test: {}", e); }
+            }
         };
 
         // Return success if we can create all the futures
@@ -77,9 +77,11 @@ async fn test_shutdown_signal_structure() {
     });
 
     // The task should complete quickly since we're just verifying structure
-    tokio::time::timeout(Duration::from_secs(1), handle).await
-        .expect("Handler structure test timed out")
-        .expect("Handler structure test failed");
+    match tokio::time::timeout(Duration::from_secs(1), handle).await {
+        Ok(Ok(_)) => {}, // Test passed
+        Ok(Err(e)) => panic!("Handler structure test failed: {}", e),
+        Err(_) => panic!("Handler structure test timed out"),
+    }
 }
 
 #[tokio::test]

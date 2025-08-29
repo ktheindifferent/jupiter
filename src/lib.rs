@@ -15,6 +15,8 @@ pub mod ssl_config;
 pub mod input_sanitizer;
 pub mod db_pool;
 pub mod pool_monitor;
+pub mod config;
+pub mod error;
 
 #[cfg(test)]
 mod tests;

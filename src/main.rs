@@ -5,6 +5,7 @@ use jupiter::provider::homebrew;
 use jupiter::provider::combo;
 use jupiter::db_pool;
 use jupiter::pool_monitor;
+use jupiter::config::Config;
 use std::env;
 use tokio::signal;
 
@@ -21,52 +22,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     log::info!("Starting Jupiter Weather Server v{}", VERSION.unwrap_or("unknown"));
 
-    // Load environment variables with proper error handling
-    let accu_key = env::var("ACCUWEATHERKEY")
-        .map_err(|_| "Environment variable ACCUWEATHERKEY is not set")?;
-    let zip_code = env::var("ZIP_CODE")
-        .map_err(|_| "Environment variable ZIP_CODE is not set")?;
+    // Load and validate configuration
+    let app_config = Config::from_env()
+        .map_err(|e| format!("Configuration error: {}", e))?;
+    
+    app_config.validate()
+        .map_err(|e| format!("Configuration validation failed: {}", e))?;
+    
+    log::info!("Configuration loaded and validated successfully");
 
     // Acuweather configuration
     let accuweather_config = accuweather::Config{
-        apikey: String::from(accu_key.clone()),
+        apikey: app_config.weather.accu_key.clone(),
         language: None,
         details: None,
         metric: None
     };
 
-    // Homebrew Weather Server configuration
-    let pg = homebrew::PostgresServer::new();
-    let homebrew_config = homebrew::Config{
-        apikey: String::from(accu_key.clone()),
-        port: 9090,
-        pg: pg
+    // Homebrew Weather Server configuration (if database config is available)
+    let homebrew_config = if let Some(ref db_config) = app_config.homebrew_database {
+        let pg = homebrew::PostgresServer::from_config(db_config);
+        Some(homebrew::Config{
+            apikey: app_config.weather.accu_key.clone(),
+            port: 9090,
+            pg: pg
+        })
+    } else {
+        log::warn!("Homebrew database configuration not found, skipping homebrew server");
+        None
     };
 
-    // Combo server configuration
-    let pg = combo::PostgresServer::new();
-    let config = combo::Config{
-        apikey: String::from(accu_key.clone()),
-        port: 9091,
-        pg: pg,
-        cache_timeout: Some(3600),
-        accu_config: Some(accuweather_config),
-        homebrew_config: Some(homebrew_config),
-        zip_code: String::from(zip_code)
-    };
+    // Combo server configuration (if database config is available)
+    if let Some(ref db_config) = app_config.combo_database {
+        let pg = combo::PostgresServer::from_config(db_config);
+        let config = combo::Config{
+            apikey: app_config.weather.accu_key.clone(),
+            port: 9091,
+            pg: pg,
+            cache_timeout: Some(3600),
+            accu_config: Some(accuweather_config),
+            homebrew_config: homebrew_config,
+            zip_code: app_config.weather.zip_code.clone()
+        };
 
-    // Initialize the server
-    log::info!("Initializing combo server on port {}", config.port);
-    config.init().await;
-    
-    // Initialize pool monitors
-    pool_monitor::init_monitors().await;
-    
-    // Start monitoring task (check every 30 seconds)
-    pool_monitor::start_monitoring_task(30).await;
-    
-    log::info!("Server successfully initialized and listening on port {}", config.port);
-    log::info!("Pool metrics available at http://localhost:{}/metrics", config.port);
+        // Initialize the server
+        log::info!("Initializing combo server on port {}", config.port);
+        config.init().await
+            .map_err(|e| format!("Failed to initialize server: {}", e))?;
+        
+        // Initialize pool monitors
+        pool_monitor::init_monitors().await;
+        
+        // Start monitoring task (check every 30 seconds)
+        pool_monitor::start_monitoring_task(30).await;
+        
+        log::info!("Server successfully initialized and listening on port {}", config.port);
+        log::info!("Pool metrics available at http://localhost:{}/metrics", config.port);
+    } else {
+        log::error!("Combo database configuration not found - cannot start server");
+        return Err("At least one database configuration (combo or homebrew) must be provided".into());
+    }
 
     // Wait for shutdown signal
     shutdown_signal().await;
@@ -85,17 +100,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = signal::ctrl_c().await {
+            log::error!("Failed to install Ctrl+C handler: {}", e);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => { signal.recv().await; },
+            Err(e) => { log::error!("Failed to install SIGTERM handler: {}", e); }
+        }
     };
 
     #[cfg(not(unix))]
