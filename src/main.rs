@@ -64,7 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Initialize the server
         log::info!("Initializing combo server on port {}", config.port);
-        config.init().await;
+        config.init().await
+            .map_err(|e| format!("Failed to initialize server: {}", e))?;
         log::info!("Server successfully initialized and listening on port {}", config.port);
     } else {
         log::error!("Combo database configuration not found - cannot start server");
@@ -85,17 +86,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = signal::ctrl_c().await {
+            log::error!("Failed to install Ctrl+C handler: {}", e);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => { signal.recv().await; },
+            Err(e) => { log::error!("Failed to install SIGTERM handler: {}", e); }
+        }
     };
 
     #[cfg(not(unix))]

@@ -21,21 +21,33 @@ fn test_cpu_usage_remains_low() {
     let mut child = Command::new("cargo")
         .args(&["run"])
         .spawn()
-        .expect("Failed to start server");
+        .unwrap_or_else(|e| panic!("Failed to start server: {}", e));
 
     // Let server initialize
     thread::sleep(Duration::from_secs(3));
 
     // Check process is running
-    assert!(child.try_wait().unwrap().is_none(), "Server should be running");
+    match child.try_wait() {
+        Ok(None) => {}, // Server is still running
+        Ok(Some(status)) => panic!("Server exited unexpectedly with status: {:?}", status),
+        Err(e) => panic!("Failed to check server status: {}", e),
+    }
 
     // Monitor for a bit to ensure no CPU spike
     thread::sleep(Duration::from_secs(2));
     
     // Still running without excessive CPU
-    assert!(child.try_wait().unwrap().is_none(), "Server should still be running");
+    match child.try_wait() {
+        Ok(None) => {}, // Server is still running
+        Ok(Some(status)) => panic!("Server exited unexpectedly with status: {:?}", status),
+        Err(e) => panic!("Failed to check server status: {}", e),
+    }
 
     // Clean shutdown
-    child.kill().expect("Failed to kill server");
-    child.wait().expect("Failed to wait for shutdown");
+    if let Err(e) = child.kill() {
+        eprintln!("Failed to kill server: {}", e);
+    }
+    if let Err(e) = child.wait() {
+        eprintln!("Failed to wait for shutdown: {}", e);
+    }
 }
