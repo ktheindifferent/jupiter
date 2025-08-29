@@ -13,6 +13,8 @@ pub mod provider;
 pub mod auth;
 pub mod ssl_config;
 pub mod input_sanitizer;
+pub mod db_pool;
+pub mod pool_monitor;
 pub mod config;
 pub mod error;
 
@@ -20,6 +22,8 @@ pub mod error;
 mod tests;
 #[cfg(test)]
 mod security_tests;
+#[cfg(test)]
+mod db_pool_tests;
 
 
 // https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude={part}&appid={API key}
