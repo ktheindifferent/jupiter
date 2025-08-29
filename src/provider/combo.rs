@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio_postgres::{Error, Row};
 use crate::ssl_config::{create_combo_connector, SslConfig};
 use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
+use crate::db_pool::{DatabasePool, DatabaseConfig, init_combo_pool, get_combo_pool};
 
 // Ability to combine, average, and cache final values between all configured providers.
 
@@ -41,6 +42,32 @@ pub struct Config {
 }
 impl Config {
     pub async fn init(&self){
+        // Initialize connection pool
+        let db_config = DatabaseConfig {
+            db_name: self.pg.db_name.clone(),
+            username: self.pg.username.clone(),
+            password: self.pg.password.clone(),
+            host: self.pg.address.clone(),
+            port: Some(5432),
+            pool_size: Some(20),
+            connection_timeout: Some(std::time::Duration::from_secs(5)),
+            idle_timeout: Some(std::time::Duration::from_secs(600)),
+            max_lifetime: Some(std::time::Duration::from_secs(1800)),
+            use_ssl: true,
+        };
+        
+        match init_combo_pool(db_config).await {
+            Ok(pool) => {
+                log::info!("[combo] Database connection pool initialized successfully");
+                // Log initial pool status
+                let status = pool.status();
+                status.log("combo");
+            },
+            Err(e) => {
+                log::error!("[combo] Failed to initialize database connection pool: {}", e);
+                panic!("Unable to initialize database connection pool: {}", e);
+            }
+        }
 
         self.build_tables().await;
 
@@ -181,6 +208,14 @@ impl Config {
                     return Response::json(&resp);
                 }
                 
+                // Add metrics endpoint
+                if request.url() == "/metrics" {
+                    if request.method() == "GET" {
+                        let metrics_json = crate::pool_monitor::handle_metrics_endpoint();
+                        return Response::text(metrics_json)
+                            .with_additional_header("Content-Type", "application/json");
+                    }
+                }
     
     
                 let mut response = Response::text("hello world");
@@ -191,23 +226,12 @@ impl Config {
     }
 
     pub async fn build_tables(&self) -> Result<(), Error>{
-    
-        // Use centralized SSL configuration
-        let connector = create_combo_connector()
-            .unwrap_or_else(|e| {
-                log::error!("Failed to create SSL connector: {}", e);
-                panic!("Unable to create SSL connector: {}", e);
-            });
-    
-        let (client, connection) = tokio_postgres::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &self.pg.username, &self.pg.password, &self.pg.address, &self.pg.db_name).as_str(), connector).await?;
+        // Get connection from pool
+        let pool = get_combo_pool()
+            .expect("Database pool not initialized");
         
-        // The connection object performs the actual communication with the database,
-        // so spawn it off to run on its own.
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
+        let client = pool.get_connection_with_retry(3).await
+            .expect("Failed to get database connection");
     
         // Build CachedWeatherData Table
         // ---------------------------------------------------------------
@@ -273,18 +297,15 @@ impl CachedWeatherData {
         ]
     }
     pub fn save(&self, config: Config) -> Result<&Self, Error>{
-        // Get a copy of the master key and postgres info
-        let postgres = config.pg.clone();
-
-        // Build SQL adapter with proper SSL verification
-        let connector = create_combo_connector()
-            .unwrap_or_else(|e| {
-                log::error!("Failed to create SSL connector: {}", e);
-                panic!("Unable to create SSL connector: {}", e);
-            });
-
-        // Build postgres client
-        let mut client = crate::postgres::Client::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), connector)?;
+        // Use async runtime to get connection from pool
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let client = runtime.block_on(async {
+            let pool = get_combo_pool()
+                .expect("Database pool not initialized");
+            
+            pool.get_connection_with_retry(3).await
+                .expect("Failed to get database connection")
+        });
 
         // Search for OID matches using secure parameterized query
         let rows = Self::select_by_oid(
@@ -293,34 +314,34 @@ impl CachedWeatherData {
         ).unwrap();
 
         if rows.len() == 0 {
-            client.execute("INSERT INTO cached_weather_data (oid, timestamp) VALUES ($1, $2)",
+            runtime.block_on(client.execute("INSERT INTO cached_weather_data (oid, timestamp) VALUES ($1, $2)",
                 &[&self.oid.clone(),
                 &self.timestamp]
-            ).unwrap();
+            )).unwrap();
         } 
 
         if self.accuweather.is_some() {
-            client.execute("UPDATE cached_weather_data SET accuweather = $1 WHERE oid = $2;", 
+            runtime.block_on(client.execute("UPDATE cached_weather_data SET accuweather = $1 WHERE oid = $2;", 
             &[
                 &self.accuweather.clone().unwrap(),
                 &self.oid
-            ])?;
+            ]))?;
         }
 
         if self.homebrew.is_some() {
-            client.execute("UPDATE cached_weather_data SET homebrew = $1 WHERE oid = $2;", 
+            runtime.block_on(client.execute("UPDATE cached_weather_data SET homebrew = $1 WHERE oid = $2;", 
             &[
                 &self.homebrew.clone().unwrap(),
                 &self.oid
-            ])?;
+            ]))?;
         }
 
         if self.openweathermap.is_some() {
-            client.execute("UPDATE cached_weather_data SET openweathermap = $1 WHERE oid = $2;", 
+            runtime.block_on(client.execute("UPDATE cached_weather_data SET openweathermap = $1 WHERE oid = $2;", 
             &[
                 &self.openweathermap.clone().unwrap(),
                 &self.oid
-            ])?;
+            ]))?;
         }
 
         return Ok(self);
@@ -329,9 +350,6 @@ impl CachedWeatherData {
     pub fn select_by_oid(config: Config, oid: &str) -> Result<Vec<Self>, Error> {
         // Validate OID input before using in query
         if !InputSanitizer::validate_oid(oid) {
-            // For postgres Error, we need to return a proper database error
-            // Since we can't directly create a custom Error, we'll let the query fail safely
-            // if invalid input gets through (which it won't with parameterized queries)
             log::error!("Invalid OID format detected: {}", oid);
         }
         
@@ -339,43 +357,38 @@ impl CachedWeatherData {
             log::error!("Potential SQL injection detected in OID: {}", oid);
         }
         
-        let postgres = config.pg.clone();
-        
-        let connector = create_combo_connector()
-            .unwrap_or_else(|e| {
-                log::error!("Failed to create SSL connector: {}", e);
-                panic!("Unable to create SSL connector: {}", e);
-            });
-        let mut client = crate::postgres::Client::connect(
-            format!("postgresql://{}:{}@{}/{}?sslmode=prefer", 
-                &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), 
-            connector
-        )?;
-        
-        let query = "SELECT * FROM cached_weather_data WHERE oid = $1 ORDER BY id DESC";
-        let mut parsed_rows: Vec<Self> = Vec::new();
-        for row in client.query(query, &[&oid])? {
-            parsed_rows.push(Self::from_row(&row).unwrap());
-        }
-        
-        Ok(parsed_rows)
+        // Use async runtime to get connection from pool
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let pool = get_combo_pool()
+                .expect("Database pool not initialized");
+            
+            let client = pool.get_connection_with_retry(3).await
+                .expect("Failed to get database connection");
+            
+            let query = "SELECT * FROM cached_weather_data WHERE oid = $1 ORDER BY id DESC";
+            let rows = client.query(query, &[&oid]).await?;
+            
+            let mut parsed_rows: Vec<Self> = Vec::new();
+            for row in rows {
+                parsed_rows.push(Self::from_row(&row).unwrap());
+            }
+            
+            Ok(parsed_rows)
+        })
     }
     
     // Secure select method with parameterized queries
     pub fn select(config: Config, limit: Option<usize>, offset: Option<usize>, order_column: Option<String>, filter_params: Option<FilterParams>) -> Result<Vec<Self>, Error> {
-        let postgres = config.pg.clone();
-        
         // Build secure query with parameterized placeholders
         let mut query = String::from("SELECT * FROM cached_weather_data");
         let mut param_count = 0;
-        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
         
         // Add WHERE clause if filter parameters provided
         if let Some(ref filters) = filter_params {
             if let Some(ref oid) = filters.oid {
                 param_count += 1;
                 query.push_str(&format!(" WHERE oid = ${}", param_count));
-                // Note: actual parameter binding happens in the query execution
             }
         }
         
@@ -398,33 +411,33 @@ impl CachedWeatherData {
             query.push_str(&format!(" OFFSET {}", offset_val));
         }
         
-        let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-        builder.set_verify(SslVerifyMode::NONE);
-        let connector = MakeTlsConnector::new(builder.build());
-        let mut client = crate::postgres::Client::connect(
-            format!("postgresql://{}:{}@{}/{}?sslmode=prefer", 
-                &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), 
-            connector
-        )?;
-        
-        let mut parsed_rows: Vec<Self> = Vec::new();
-        
-        // Execute query with appropriate parameters
-        let rows = if let Some(ref filters) = filter_params {
-            if let Some(ref oid) = filters.oid {
-                client.query(&query, &[oid])?
+        // Use async runtime to get connection from pool
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let pool = get_combo_pool()
+                .expect("Database pool not initialized");
+            
+            let client = pool.get_connection_with_retry(3).await
+                .expect("Failed to get database connection");
+            
+            // Execute query with appropriate parameters
+            let rows = if let Some(ref filters) = filter_params {
+                if let Some(ref oid) = filters.oid {
+                    client.query(&query, &[oid]).await?
+                } else {
+                    client.query(&query, &[]).await?
+                }
             } else {
-                client.query(&query, &[])?
+                client.query(&query, &[]).await?
+            };
+            
+            let mut parsed_rows: Vec<Self> = Vec::new();
+            for row in rows {
+                parsed_rows.push(Self::from_row(&row).unwrap());
             }
-        } else {
-            client.query(&query, &[])?
-        };
-        
-        for row in rows {
-            parsed_rows.push(Self::from_row(&row).unwrap());
-        }
-        
-        return Ok(parsed_rows);
+            
+            Ok(parsed_rows)
+        })
     }
     fn from_row(row: &Row) -> Result<Self, Error> {
         return Ok(Self {

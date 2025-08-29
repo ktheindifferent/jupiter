@@ -3,6 +3,8 @@ extern crate jupiter;
 use jupiter::provider::accuweather;
 use jupiter::provider::homebrew;
 use jupiter::provider::combo;
+use jupiter::db_pool;
+use jupiter::pool_monitor;
 use std::env;
 use tokio::signal;
 
@@ -56,12 +58,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the server
     log::info!("Initializing combo server on port {}", config.port);
     config.init().await;
+    
+    // Initialize pool monitors
+    pool_monitor::init_monitors().await;
+    
+    // Start monitoring task (check every 30 seconds)
+    pool_monitor::start_monitoring_task(30).await;
+    
     log::info!("Server successfully initialized and listening on port {}", config.port);
+    log::info!("Pool metrics available at http://localhost:{}/metrics", config.port);
 
     // Wait for shutdown signal
     shutdown_signal().await;
     
     log::info!("Shutdown signal received, gracefully shutting down...");
+    
+    // Shutdown database connection pools
+    db_pool::shutdown_pools().await;
     
     // Give the server threads a moment to finish current requests
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
