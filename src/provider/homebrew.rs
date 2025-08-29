@@ -18,6 +18,7 @@ use std::sync::Arc;
 use tokio_postgres::{Error, Row};
 use crate::ssl_config::{create_homebrew_connector, SslConfig};
 use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
+use crate::config::{DatabaseConfig, ConfigError};
 
 // Can have multiple homebrew instruments
 // Support temperature humidity, windspeed, wind direction, percipitation, PM2.5, PM10, C02, TVOC, etc.
@@ -366,9 +367,8 @@ impl WeatherReport {
             query.push_str(&format!(" OFFSET {}", offset_val));
         }
         
-        let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-        builder.set_verify(SslVerifyMode::NONE);
-        let connector = MakeTlsConnector::new(builder.build());
+        let connector = create_homebrew_connector()
+            .expect("Failed to create SSL connector");
         let mut client = crate::postgres::Client::connect(
             format!("postgresql://{}:{}@{}/{}?sslmode=prefer", 
                 &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), 
@@ -420,19 +420,23 @@ pub struct PostgresServer {
 	pub address: String
 }
 impl PostgresServer {
-    pub fn new() -> PostgresServer {
-
-        let db_name = env::var("HOMEBREW_PG_DBNAME").expect("$HOMEBREW_PG_DBNAME is not set");
-        let username = env::var("HOMEBREW_PG_USER").expect("$HOMEBREW_PG_USER is not set");
-        let password = env::var("HOMEBREW_PG_PASS").expect("$HOMEBREW_PG_PASS is not set");
-        let address = env::var("HOMEBREW_PG_ADDRESS").expect("$HOMEBREW_PG_ADDRESS is not set");
-
-
-        PostgresServer{
-            db_name, 
-            username, 
-            password, 
-            address
+    pub fn new() -> Result<PostgresServer, ConfigError> {
+        let config = DatabaseConfig::homebrew_from_env()?;
+        
+        Ok(PostgresServer {
+            db_name: config.db_name,
+            username: config.username,
+            password: config.password,
+            address: config.address,
+        })
+    }
+    
+    pub fn from_config(config: &DatabaseConfig) -> PostgresServer {
+        PostgresServer {
+            db_name: config.db_name.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            address: config.address.clone(),
         }
     }
 }
