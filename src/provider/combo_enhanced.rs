@@ -10,6 +10,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use std::collections::HashMap;
 
+// Helper function to safely get current timestamp
+fn get_current_timestamp() -> Result<i64, WeatherError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| WeatherError::ConfigurationError(format!("Failed to get system time: {}", e)))
+}
+
+fn get_current_timestamp_u64() -> Result<u64, WeatherError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| WeatherError::ConfigurationError(format!("Failed to get system time: {}", e)))
+}
+
 pub struct ComboProvider {
     providers: Vec<Box<dyn WeatherProvider>>,
     weights: HashMap<String, f64>,
@@ -184,7 +199,7 @@ impl ComboProvider {
                 region: None,
                 postal_code: None,
             }),
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
+            timestamp: get_current_timestamp()?,
         })
     }
     
@@ -452,7 +467,8 @@ impl WeatherProvider for ComboProvider {
             return Err(WeatherError::NotFound("No historical data available".to_string()));
         }
         
-        let first = results.first().unwrap();
+        let first = results.first()
+            .ok_or_else(|| WeatherError::ConfigurationError("Results unexpectedly empty".to_string()))?;
         Ok(first.1.clone())
     }
     
@@ -500,7 +516,7 @@ impl WeatherCache {
     }
     
     fn get(&self, key: &str, ttl_secs: u64) -> Option<serde_json::Value> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = get_current_timestamp_u64().ok()?;
         
         self.data.get(key).and_then(|entry| {
             if now - entry.timestamp < ttl_secs {
@@ -512,7 +528,7 @@ impl WeatherCache {
     }
     
     fn set(&mut self, key: String, value: serde_json::Value) {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let timestamp = get_current_timestamp_u64().unwrap_or(0);
         self.data.insert(key, CacheEntry { value, timestamp });
     }
 }

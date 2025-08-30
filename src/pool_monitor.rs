@@ -65,7 +65,13 @@ impl PoolMonitor {
     }
 
     pub fn get_metrics(&self, pool_name: String, size: usize, available: usize, waiting: usize) -> PoolMetrics {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or_else(|e| {
+                log::error!("Failed to get system time: {}", e);
+                0
+            });
         
         PoolMetrics {
             pool_name,
