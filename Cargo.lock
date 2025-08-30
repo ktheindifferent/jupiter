@@ -823,6 +823,7 @@ dependencies = [
 name = "jupiter"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "deadpool",
  "deadpool-postgres",
  "log",

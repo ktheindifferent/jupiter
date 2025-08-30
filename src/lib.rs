@@ -17,6 +17,7 @@ pub mod db_pool;
 pub mod pool_monitor;
 pub mod config;
 pub mod error;
+pub mod utils;
 
 #[cfg(test)]
 mod tests;

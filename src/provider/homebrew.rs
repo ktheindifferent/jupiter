@@ -335,32 +335,17 @@ impl WeatherReport {
             "",
         ]
     }
-<<<<<<< HEAD
-    pub fn save(&self, config: Config) -> Result<&Self, Error>{
+    pub fn save(&self, config: Config) -> JupiterResult<&Self> {
         // Use async runtime to get connection from pool
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| JupiterError::Database(format!("Failed to create runtime: {}", e)))?;
         let client = runtime.block_on(async {
             let pool = get_homebrew_pool()
-                .expect("Database pool not initialized");
+                .ok_or_else(|| JupiterError::Database("Database pool not initialized".to_string()))?;
             
             pool.get_connection_with_retry(3).await
-                .expect("Failed to get database connection")
-        });
-=======
-    pub fn save(&self, config: Config) -> JupiterResult<&Self> {
-        // Get a copy of the master key and postgres info
-        let postgres = config.pg.clone();
-
-        // Build SQL adapter with proper SSL verification
-        let connector = create_homebrew_connector()
-            .map_err(|e| {
-                log::error!("Failed to create SSL connector: {}", e);
-                JupiterError::SslError(format!("Unable to create SSL connector: {}", e))
-            })?;
-
-        // Build postgres client
-        let mut client = crate::postgres::Client::connect(format!("postgresql://{}:{}@{}/{}?sslmode=prefer", &postgres.username, &postgres.password, &postgres.address, &postgres.db_name).as_str(), connector)?;
->>>>>>> master
+                .map_err(|e| JupiterError::Database(format!("Failed to get database connection: {}", e)))
+        })?;
 
         // Search for OID matches using secure parameterized query
         let rows = Self::select_by_oid(
@@ -369,71 +354,83 @@ impl WeatherReport {
         )?;
 
         if rows.len() == 0 {
-            runtime.block_on(client.execute("INSERT INTO weather_reports (oid, device_type, timestamp) VALUES ($1, $2, $3)",
-                &[&self.oid.clone(),
-                &self.device_type,
-                &self.timestamp]
-<<<<<<< HEAD
-            )).unwrap();
-=======
-            )?;
->>>>>>> master
+            runtime.block_on(async {
+                client.execute("INSERT INTO weather_reports (oid, device_type, timestamp) VALUES ($1, $2, $3)",
+                    &[&self.oid.clone(),
+                    &self.device_type,
+                    &self.timestamp]
+                ).await
+            }).map_err(|e| JupiterError::Database(format!("Failed to insert: {}", e)))?;
         } 
 
         if self.temperature.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET temperature = $1 WHERE oid = $2;", 
-            &[
-                &self.temperature,
-                &self.oid
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET temperature = $1 WHERE oid = $2;", 
+                &[
+                    &self.temperature,
+                    &self.oid
+                ]).await
+            }).map_err(|e| JupiterError::Database(format!("Failed to update temperature: {}", e)))?;
         }
 
         if self.humidity.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET humidity = $1 WHERE oid = $2;", 
-            &[
-                &self.humidity,
-                &self.oid
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET humidity = $1 WHERE oid = $2;", 
+                &[
+                    &self.humidity,
+                    &self.oid
+                ]).await
+            }).map_err(|e| JupiterError::Database(format!("Failed to update humidity: {}", e)))?;
         }
 
         if self.percipitation.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET percipitation = $1 WHERE oid = $2;", 
-            &[
-                &self.percipitation,
-                &self.oid
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET percipitation = $1 WHERE oid = $2;", 
+                &[
+                    &self.percipitation,
+                    &self.oid
+                ]).await
+            }).map_err(|e| JupiterError::Database(format!("Failed to update percipitation: {}", e)))?;
         }
 
         if self.pm10.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET pm10 = $1 WHERE oid = $2;", 
-            &[
-                &self.pm10,
-                &self.oid
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET pm10 = $1 WHERE oid = $2;", 
+                &[
+                    &self.pm10,
+                    &self.oid
+                ]).await
+            }).map_err(|e| JupiterError::Database(format!("Failed to update pm10: {}", e)))?;
         }
 
         if self.pm25.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET pm25 = $1 WHERE oid = $2;", 
-            &[
-                &self.pm25,
-                &self.oid
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET pm25 = $1 WHERE oid = $2;", 
+                &[
+                    &self.pm25,
+                    &self.oid
+                ]).await
+            }).map_err(|e| JupiterError::Database(format!("Failed to update pm25: {}", e)))?;
         }
 
         if self.co2.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET co2 = $1 WHERE oid = $2;", 
-            &[
-                &self.co2,
-                &self.oid
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET co2 = $1 WHERE oid = $2;", 
+                &[
+                    &self.co2,
+                    &self.oid
+                ]).await
+            }).map_err(|e| JupiterError::Database(format!("Failed to update co2: {}", e)))?;
         }
 
         if self.tvoc.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET tvoc = $1 WHERE oid = $2;", 
-            &[
-                &self.tvoc,
-                &self.oid
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET tvoc = $1 WHERE oid = $2;", 
+                &[
+                    &self.tvoc,
+                    &self.oid
+                ]).await
+            }).map_err(|e| JupiterError::Database(format!("Failed to update tvoc: {}", e)))?;
         }
 
         return Ok(self);
@@ -583,6 +580,5 @@ impl PostgresServer {
             password: config.password.clone(),
             address: config.address.clone(),
         }
-
     }
 }

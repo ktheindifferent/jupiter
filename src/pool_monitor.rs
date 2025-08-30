@@ -1,8 +1,8 @@
 use crate::db_pool::{get_homebrew_pool, get_combo_pool};
+use crate::utils::time::safe_timestamp_with_fallback;
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::Duration;
 use log::{info, warn, error};
 
@@ -65,7 +65,7 @@ impl PoolMonitor {
     }
 
     pub fn get_metrics(&self, pool_name: String, size: usize, available: usize, waiting: usize) -> PoolMetrics {
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let timestamp = safe_timestamp_with_fallback();
         
         PoolMetrics {
             pool_name,
