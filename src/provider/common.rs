@@ -118,7 +118,7 @@ pub struct Alert {
     pub regions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AlertSeverity {
     Minor,
     Moderate,

@@ -1,13 +1,4 @@
 
-// TODO - Full Acuweather API Support
-// - Locations API
-// - Forecast API
-
-// TODO - Full OpenWeather API Support
-
-// TODO - Homebrew API for homebrew weather monitoring
-
-// TODO - Combo API for averaging results between multiple providers and reducing paid API calls
 extern crate postgres;
 pub mod provider;
 pub mod auth;
