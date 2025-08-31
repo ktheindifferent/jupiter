@@ -10,6 +10,14 @@ use crate::provider::homebrew::{Config, WeatherReport, PostgresServer};
 use crate::utils::time::safe_timestamp_with_fallback;
 use std::collections::HashMap;
 
+// Helper function to safely get current timestamp
+fn get_current_timestamp() -> Result<i64, WeatherError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| WeatherError::ConfigurationError(format!("Failed to get system time: {}", e)))
+}
+
 pub struct HomebrewProvider {
     config: Config,
     location_mappings: HashMap<String, LocationInfo>,
@@ -78,9 +86,9 @@ impl HomebrewProvider {
             return Err(WeatherError::NotFound("No data available".to_string()));
         }
         
+        let now = get_current_timestamp()?;
         let recent_reports: Vec<_> = all_reports.iter()
             .filter(|r| {
-                let now = safe_timestamp_with_fallback();
                 now - r.timestamp < 3600
             })
             .collect();
@@ -484,8 +492,8 @@ pub async fn create_weather_report(
     report.device_type = device_type;
     
     report.save(config)
-        .map(|_| report)
-        .map_err(|e| WeatherError::DatabaseError(e.to_string()))
+        .map_err(|e| WeatherError::DatabaseError(e.to_string()))?;
+    Ok(report)
 }
 
 pub async fn get_latest_weather_report(config: Config) -> Result<Option<WeatherReport>, WeatherError> {

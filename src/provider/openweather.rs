@@ -58,130 +58,8 @@ impl OpenWeatherProvider {
             Ok((geo.lat, geo.lon, geo.name.clone()))
         }
     }
-}
-
-#[async_trait]
-impl WeatherProvider for OpenWeatherProvider {
-    async fn get_current_weather(&self, location: &str) -> Result<Weather, WeatherError> {
-        let (lat, lon, name) = self.geocode_location(location).await?;
-        
-        if !self.rate_limiter.check_rate_limit() {
-            return Err(WeatherError::RateLimitExceeded);
-        }
-        
-        let url = format!("{}/data/2.5/weather?lat={}&lon={}&appid={}&units=metric", 
-            self.base_url, lat, lon, self.api_key);
-            
-        let response = self.client.get(&url)
-            .send()
-            .await?;
-            
-        let current: OpenWeatherCurrent = response.json().await?;
-        
-        Ok(Weather {
-            temperature: current.main.temp,
-            feels_like: Some(current.main.feels_like),
-            humidity: Some(current.main.humidity),
-            pressure: Some(current.main.pressure),
-            wind_speed: Some(current.wind.speed),
-            wind_direction: current.wind.deg,
-            description: current.weather.first()
-                .map(|w| w.description.clone())
-                .unwrap_or_default(),
-            icon: current.weather.first().map(|w| w.icon.clone()),
-            precipitation: current.rain.as_ref().map(|r| r.one_h.unwrap_or(0.0))
-                .or_else(|| current.snow.as_ref().map(|s| s.one_h.unwrap_or(0.0))),
-            visibility: current.visibility.map(|v| v as f64),
-            uv_index: None,
-            provider: "OpenWeather".to_string(),
-            location: Location {
-                latitude: lat,
-                longitude: lon,
-                name: name.clone(),
-                country: Some(current.sys.country.clone()),
-                region: None,
-                postal_code: None,
-            },
-            timestamp: current.dt as i64,
-        })
-    }
     
-    async fn get_forecast(&self, location: &str, days: u8) -> Result<Forecast, WeatherError> {
-        let (lat, lon, name) = self.geocode_location(location).await?;
-        
-        if !self.rate_limiter.check_rate_limit() {
-            return Err(WeatherError::RateLimitExceeded);
-        }
-        
-        let url = format!("{}/data/3.0/onecall?lat={}&lon={}&exclude=minutely,alerts&appid={}&units=metric", 
-            self.base_url, lat, lon, self.api_key);
-            
-        let response = self.client.get(&url)
-            .send()
-            .await?;
-            
-        if response.status() == 403 {
-            // Fall back to 5-day forecast API if One Call API is not available
-            return self.get_5day_forecast(location, days).await;
-        }
-        
-        let forecast: OpenWeatherOneCall = response.json().await?;
-        
-        let daily = forecast.daily.iter()
-            .take(days as usize)
-            .map(|d| DailyForecast {
-                date: format_timestamp(d.dt),
-                temperature_min: d.temp.min,
-                temperature_max: d.temp.max,
-                humidity: Some(d.humidity),
-                precipitation_probability: Some(d.pop * 100.0),
-                precipitation_amount: d.rain.or(d.snow),
-                wind_speed: Some(d.wind_speed),
-                wind_direction: Some(d.wind_deg),
-                description: d.weather.first()
-                    .map(|w| w.description.clone())
-                    .unwrap_or_default(),
-                icon: d.weather.first().map(|w| w.icon.clone()),
-                sunrise: Some(format_timestamp(d.sunrise)),
-                sunset: Some(format_timestamp(d.sunset)),
-            })
-            .collect();
-        
-        let hourly = Some(forecast.hourly.iter()
-            .take(48)
-            .map(|h| HourlyForecast {
-                datetime: format_timestamp(h.dt),
-                temperature: h.temp,
-                feels_like: Some(h.feels_like),
-                humidity: Some(h.humidity),
-                precipitation_probability: Some(h.pop * 100.0),
-                precipitation_amount: h.rain.as_ref().map(|r| r.one_h.unwrap_or(0.0))
-                    .or_else(|| h.snow.as_ref().map(|s| s.one_h.unwrap_or(0.0))),
-                wind_speed: Some(h.wind_speed),
-                wind_direction: Some(h.wind_deg),
-                description: h.weather.first()
-                    .map(|w| w.description.clone())
-                    .unwrap_or_default(),
-                icon: h.weather.first().map(|w| w.icon.clone()),
-            })
-            .collect());
-        
-        Ok(Forecast {
-            location: Location {
-                latitude: lat,
-                longitude: lon,
-                name,
-                country: None,
-                region: None,
-                postal_code: None,
-            },
-            provider: "OpenWeather".to_string(),
-            daily,
-            hourly,
-        })
-    }
-    
-    async fn get_5day_forecast(&self, location: &str, days: u8) -> Result<Forecast, WeatherError> {
+    async fn get_5day_forecast_internal(&self, location: &str, days: u8) -> Result<Forecast, WeatherError> {
         let (lat, lon, name) = self.geocode_location(location).await?;
         
         if !self.rate_limiter.check_rate_limit() {
@@ -268,6 +146,128 @@ impl WeatherProvider for OpenWeatherProvider {
                     .or_else(|| h.snow.as_ref().and_then(|s| s.three_h)),
                 wind_speed: Some(h.wind.speed),
                 wind_direction: h.wind.deg,
+                description: h.weather.first()
+                    .map(|w| w.description.clone())
+                    .unwrap_or_default(),
+                icon: h.weather.first().map(|w| w.icon.clone()),
+            })
+            .collect());
+        
+        Ok(Forecast {
+            location: Location {
+                latitude: lat,
+                longitude: lon,
+                name,
+                country: None,
+                region: None,
+                postal_code: None,
+            },
+            provider: "OpenWeather".to_string(),
+            daily,
+            hourly,
+        })
+    }
+}
+
+#[async_trait]
+impl WeatherProvider for OpenWeatherProvider {
+    async fn get_current_weather(&self, location: &str) -> Result<Weather, WeatherError> {
+        let (lat, lon, name) = self.geocode_location(location).await?;
+        
+        if !self.rate_limiter.check_rate_limit() {
+            return Err(WeatherError::RateLimitExceeded);
+        }
+        
+        let url = format!("{}/data/2.5/weather?lat={}&lon={}&appid={}&units=metric", 
+            self.base_url, lat, lon, self.api_key);
+            
+        let response = self.client.get(&url)
+            .send()
+            .await?;
+            
+        let current: OpenWeatherCurrent = response.json().await?;
+        
+        Ok(Weather {
+            temperature: current.main.temp,
+            feels_like: Some(current.main.feels_like),
+            humidity: Some(current.main.humidity),
+            pressure: Some(current.main.pressure),
+            wind_speed: Some(current.wind.speed),
+            wind_direction: current.wind.deg,
+            description: current.weather.first()
+                .map(|w| w.description.clone())
+                .unwrap_or_default(),
+            icon: current.weather.first().map(|w| w.icon.clone()),
+            precipitation: current.rain.as_ref().map(|r| r.one_h.unwrap_or(0.0))
+                .or_else(|| current.snow.as_ref().map(|s| s.one_h.unwrap_or(0.0))),
+            visibility: current.visibility.map(|v| v as f64),
+            uv_index: None,
+            provider: "OpenWeather".to_string(),
+            location: Location {
+                latitude: lat,
+                longitude: lon,
+                name: name.clone(),
+                country: Some(current.sys.country.clone()),
+                region: None,
+                postal_code: None,
+            },
+            timestamp: current.dt as i64,
+        })
+    }
+    
+    async fn get_forecast(&self, location: &str, days: u8) -> Result<Forecast, WeatherError> {
+        let (lat, lon, name) = self.geocode_location(location).await?;
+        
+        if !self.rate_limiter.check_rate_limit() {
+            return Err(WeatherError::RateLimitExceeded);
+        }
+        
+        let url = format!("{}/data/3.0/onecall?lat={}&lon={}&exclude=minutely,alerts&appid={}&units=metric", 
+            self.base_url, lat, lon, self.api_key);
+            
+        let response = self.client.get(&url)
+            .send()
+            .await?;
+            
+        if response.status() == 403 {
+            // Fall back to 5-day forecast API if One Call API is not available
+            return self.get_5day_forecast_internal(location, days).await;
+        }
+        
+        let forecast: OpenWeatherOneCall = response.json().await?;
+        
+        let daily = forecast.daily.iter()
+            .take(days as usize)
+            .map(|d| DailyForecast {
+                date: format_timestamp(d.dt),
+                temperature_min: d.temp.min,
+                temperature_max: d.temp.max,
+                humidity: Some(d.humidity),
+                precipitation_probability: Some(d.pop * 100.0),
+                precipitation_amount: d.rain.or(d.snow),
+                wind_speed: Some(d.wind_speed),
+                wind_direction: Some(d.wind_deg),
+                description: d.weather.first()
+                    .map(|w| w.description.clone())
+                    .unwrap_or_default(),
+                icon: d.weather.first().map(|w| w.icon.clone()),
+                sunrise: Some(format_timestamp(d.sunrise)),
+                sunset: Some(format_timestamp(d.sunset)),
+            })
+            .collect();
+        
+        let hourly = Some(forecast.hourly.iter()
+            .take(48)
+            .map(|h| HourlyForecast {
+                datetime: format_timestamp(h.dt),
+                temperature: h.temp,
+                feels_like: Some(h.feels_like),
+                humidity: Some(h.humidity),
+                precipitation_probability: Some(h.pop * 100.0),
+                precipitation_amount: h.rain.as_ref().map(|r| r.one_h.unwrap_or(0.0))
+                    .or_else(|| h.snow.as_ref().map(|s| s.one_h.unwrap_or(0.0))),
+                wind_speed: Some(h.wind_speed),
+                wind_direction: Some(h.wind_deg),
                 description: h.weather.first()
                     .map(|w| w.description.clone())
                     .unwrap_or_default(),

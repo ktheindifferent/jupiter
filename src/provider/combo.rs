@@ -24,8 +24,9 @@ use crate::ssl_config::{create_combo_connector, SslConfig};
 use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use crate::db_pool::{DatabasePool, DatabaseConfig, init_combo_pool, get_combo_pool};
-use crate::config::{ConfigError};
+use crate::db_pool::{DatabasePool, init_combo_pool, get_combo_pool};
+use crate::db_pool::DatabaseConfig as DbPoolConfig;
+use crate::config::{ConfigError, DatabaseConfig};
 
 // Ability to combine, average, and cache final values between all configured providers.
 
@@ -90,7 +91,7 @@ impl Config {
 
     pub async fn init(&mut self) -> JupiterResult<()> {
         // Initialize connection pool
-        let db_config = DatabaseConfig {
+        let db_config = DbPoolConfig {
             db_name: self.pg.db_name.clone(),
             username: self.pg.username.clone(),
             password: self.pg.password.clone(),
@@ -112,7 +113,7 @@ impl Config {
             },
             Err(e) => {
                 log::error!("[combo] Failed to initialize database connection pool: {}", e);
-                return Err(JupiterError::Database(format!("Unable to initialize database connection pool: {}", e)));
+                return Err(JupiterError::DatabaseError(format!("Unable to initialize database connection pool: {}", e)));
             }
         }
 
@@ -120,7 +121,9 @@ impl Config {
 
         let config = self.clone();
         let shutdown_flag = self.shutdown_flag.clone();
-        let _shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let _shutdown_rx = self.shutdown_tx.as_ref()
+            .ok_or_else(|| JupiterError::ConfigurationError("Shutdown channel not initialized".into()))?
+            .subscribe();
         let server_port = config.port;
         
         let handle = thread::spawn(move || {
@@ -292,7 +295,6 @@ impl Config {
 
                     resp.save(config.clone());
 
-                    // let objects = WeatherReport::select(config.clone(), None, None, None, None).unwrap();
                     return Response::json(&resp);
                 }
                 
@@ -309,7 +311,10 @@ impl Config {
                 let mut response = Response::text("hello world");
 
                 return response;
-            }).expect("Failed to create server");
+            }).unwrap_or_else(|e| {
+                log::error!("Failed to create server: {}", e);
+                panic!("Failed to create server: {}", e);
+            });
             
             log::info!("Combo server started on port {}", server_port);
             
@@ -322,7 +327,8 @@ impl Config {
         });
         
         if let Some(handle_mutex) = &self.server_handle {
-            let mut handle_guard = handle_mutex.lock().unwrap();
+            let mut handle_guard = handle_mutex.lock()
+                .map_err(|e| JupiterError::LockError(format!("Failed to acquire server handle lock: {}", e)))?;
             *handle_guard = Some(handle);
         }
         
@@ -350,13 +356,14 @@ impl Config {
             
             // Try to join with timeout
             let join_result = tokio::time::timeout(timeout, async move {
-                let mut handle_guard = handle_mutex_clone.lock().unwrap();
-                if let Some(handle) = handle_guard.take() {
-                    // Since we can't directly join std::thread in async context,
-                    // we'll use a different approach
-                    let _ = tokio::task::spawn_blocking(move || {
-                        handle.join()
-                    }).await;
+                if let Ok(mut handle_guard) = handle_mutex_clone.lock() {
+                    if let Some(handle) = handle_guard.take() {
+                        // Since we can't directly join std::thread in async context,
+                        // we'll use a different approach
+                        let _ = tokio::task::spawn_blocking(move || {
+                            handle.join()
+                        }).await;
+                    }
                 }
             }).await;
             
@@ -378,10 +385,10 @@ impl Config {
     pub async fn build_tables(&self) -> JupiterResult<()> {
         // Get connection from pool
         let pool = get_combo_pool()
-            .ok_or_else(|| JupiterError::Database("Database pool not initialized".to_string()))?;
+            .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".to_string()))?;
         
         let client = pool.get_connection_with_retry(3).await
-            .map_err(|e| JupiterError::Database(format!("Failed to get database connection: {}", e)))?;
+            .map_err(|e| JupiterError::DatabaseError(format!("Failed to get database connection: {}", e)))?;
     
         // Build CachedWeatherData Table
         // ---------------------------------------------------------------
@@ -454,13 +461,13 @@ impl CachedWeatherData {
     pub fn save(&self, config: Config) -> JupiterResult<&Self> {
         // Use async runtime to get connection from pool
         let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| JupiterError::Database(format!("Failed to create runtime: {}", e)))?;
+            .map_err(|e| JupiterError::DatabaseError(format!("Failed to create runtime: {}", e)))?;
         let mut client = runtime.block_on(async {
             let pool = get_combo_pool()
-                .ok_or_else(|| JupiterError::Database("Database pool not initialized".to_string()))?;
+                .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".to_string()))?;
             
             pool.get_connection_with_retry(3).await
-                .map_err(|e| JupiterError::Database(format!("Failed to get database connection: {}", e)))
+                .map_err(|e| JupiterError::DatabaseError(format!("Failed to get database connection: {}", e)))
         })?;
 
         // Search for OID matches using secure parameterized query
@@ -515,22 +522,22 @@ impl CachedWeatherData {
         
         // Use async runtime to get connection from pool
         let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| JupiterError::Database(format!("Failed to create runtime: {}", e)))?;
+            .map_err(|e| JupiterError::DatabaseError(format!("Failed to create runtime: {}", e)))?;
         runtime.block_on(async {
             let pool = get_combo_pool()
-                .ok_or_else(|| JupiterError::Database("Database pool not initialized".to_string()))?;
+                .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".to_string()))?;
             
             let client = pool.get_connection_with_retry(3).await
-                .map_err(|e| JupiterError::Database(format!("Failed to get database connection: {}", e)))?;
+                .map_err(|e| JupiterError::DatabaseError(format!("Failed to get database connection: {}", e)))?;
             
             let query = "SELECT * FROM cached_weather_data WHERE oid = $1 ORDER BY id DESC";
             let rows = client.query(query, &[&oid]).await
-                .map_err(|e| JupiterError::Database(format!("Query failed: {}", e)))?;
+                .map_err(|e| JupiterError::DatabaseError(format!("Query failed: {}", e)))?;
             
             let mut parsed_rows: Vec<Self> = Vec::new();
             for row in rows {
                 parsed_rows.push(Self::from_row(&row)
-                    .map_err(|e| JupiterError::Database(format!("Failed to parse row: {}", e)))?);
+                    .map_err(|e| JupiterError::DatabaseError(format!("Failed to parse row: {}", e)))?);
             }
             
             Ok(parsed_rows)
@@ -572,32 +579,32 @@ impl CachedWeatherData {
         
         // Use async runtime to get connection from pool
         let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| JupiterError::Database(format!("Failed to create runtime: {}", e)))?;
+            .map_err(|e| JupiterError::DatabaseError(format!("Failed to create runtime: {}", e)))?;
         runtime.block_on(async {
             let pool = get_combo_pool()
-                .ok_or_else(|| JupiterError::Database("Database pool not initialized".to_string()))?;
+                .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".to_string()))?;
             
             let client = pool.get_connection_with_retry(3).await
-                .map_err(|e| JupiterError::Database(format!("Failed to get database connection: {}", e)))?;
+                .map_err(|e| JupiterError::DatabaseError(format!("Failed to get database connection: {}", e)))?;
             
             // Execute query with appropriate parameters
             let rows = if let Some(ref filters) = filter_params {
                 if let Some(ref oid) = filters.oid {
                     client.query(&query, &[oid]).await
-                        .map_err(|e| JupiterError::Database(format!("Query failed: {}", e)))?
+                        .map_err(|e| JupiterError::DatabaseError(format!("Query failed: {}", e)))?
                 } else {
                     client.query(&query, &[]).await
-                        .map_err(|e| JupiterError::Database(format!("Query failed: {}", e)))?
+                        .map_err(|e| JupiterError::DatabaseError(format!("Query failed: {}", e)))?
                 }
             } else {
                 client.query(&query, &[]).await
-                    .map_err(|e| JupiterError::Database(format!("Query failed: {}", e)))?
+                    .map_err(|e| JupiterError::DatabaseError(format!("Query failed: {}", e)))?
             };
             
             let mut parsed_rows: Vec<Self> = Vec::new();
             for row in rows {
                 parsed_rows.push(Self::from_row(&row)
-                    .map_err(|e| JupiterError::Database(format!("Failed to parse row: {}", e)))?);
+                    .map_err(|e| JupiterError::DatabaseError(format!("Failed to parse row: {}", e)))?);
             }
             
             Ok(parsed_rows)
@@ -644,6 +651,14 @@ impl PostgresServer {
             password: config.password.clone(),
             address: config.address.clone(),
         }
-
+    }
+    
+    pub fn from_db_pool_config(config: &DbPoolConfig) -> PostgresServer {
+        PostgresServer {
+            db_name: config.db_name.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            address: config.host.clone(),
+        }
     }
 }

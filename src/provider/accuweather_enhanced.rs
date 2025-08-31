@@ -8,6 +8,14 @@ use super::common::{
 use std::sync::Arc;
 use crate::utils::time::safe_timestamp_with_fallback;
 
+// Helper function to safely get current timestamp
+fn get_current_timestamp() -> Result<i64, WeatherError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| WeatherError::ConfigurationError(format!("Failed to get system time: {}", e)))
+}
+
 pub struct AccuWeatherProvider {
     api_key: String,
     base_url: String,

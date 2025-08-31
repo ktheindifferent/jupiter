@@ -10,6 +10,21 @@ use crate::utils::time::safe_timestamp_with_fallback;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
 
+// Helper function to safely get current timestamp
+fn get_current_timestamp() -> Result<i64, WeatherError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| WeatherError::ConfigurationError(format!("Failed to get system time: {}", e)))
+}
+
+fn get_current_timestamp_u64() -> Result<u64, WeatherError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|e| WeatherError::ConfigurationError(format!("Failed to get system time: {}", e)))
+}
+
 pub struct ComboProvider {
     providers: Vec<Box<dyn WeatherProvider>>,
     weights: HashMap<String, f64>,
@@ -54,37 +69,6 @@ impl ComboProvider {
     async fn store_in_cache(&self, key: &str, value: serde_json::Value) {
         let mut cache = self.cache.write().await;
         cache.set(key.to_string(), value);
-    }
-    
-    async fn fetch_with_fallback<T, F, Fut>(&self, location: &str, fetch_fn: F) -> Vec<(String, T)>
-    where
-        F: Fn(&Box<dyn WeatherProvider>, &str) -> Fut + Clone,
-        Fut: std::future::Future<Output = Result<T, WeatherError>>,
-        T: Clone,
-    {
-        let mut results = Vec::new();
-        let mut errors = Vec::new();
-        
-        for provider in &self.providers {
-            let provider_name = provider.name().to_string();
-            match fetch_fn(provider, location).await {
-                Ok(data) => {
-                    results.push((provider_name, data));
-                    if !self.fallback_enabled {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    errors.push((provider_name, e));
-                }
-            }
-        }
-        
-        if results.is_empty() && !errors.is_empty() {
-            log::error!("All providers failed for location {}: {:?}", location, errors);
-        }
-        
-        results
     }
     
     fn average_weather(&self, weathers: Vec<(String, Weather)>) -> Result<Weather, WeatherError> {
@@ -179,7 +163,7 @@ impl ComboProvider {
             location: location.unwrap_or_else(|| Location {
                 latitude: 0.0,
                 longitude: 0.0,
-                name: location.to_string(),
+                name: "Unknown".to_string(),
                 country: None,
                 region: None,
                 postal_code: None,
@@ -381,10 +365,21 @@ impl WeatherProvider for ComboProvider {
             }
         }
         
-        let results = self.fetch_with_fallback(location, |provider, loc| {
-            let loc = loc.to_string();
-            async move { provider.get_current_weather(&loc).await }
-        }).await;
+        let mut results = Vec::new();
+        for provider in &self.providers {
+            let provider_name = provider.name().to_string();
+            match provider.get_current_weather(location).await {
+                Ok(data) => {
+                    results.push((provider_name, data));
+                    if !self.fallback_enabled {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    log::error!("Provider {} failed: {:?}", provider_name, e);
+                }
+            }
+        }
         
         let weather = self.average_weather(results)?;
         
@@ -404,10 +399,23 @@ impl WeatherProvider for ComboProvider {
             }
         }
         
-        let results = self.fetch_with_fallback(location, |provider, loc| {
-            let loc = loc.to_string();
-            async move { provider.get_forecast(&loc, days).await }
-        }).await;
+        let mut results = Vec::new();
+        for provider in &self.providers {
+            if provider.supports_feature(WeatherFeature::Forecast) {
+                let provider_name = provider.name().to_string();
+                match provider.get_forecast(location, days).await {
+                    Ok(data) => {
+                        results.push((provider_name, data));
+                        if !self.fallback_enabled {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Provider {} failed: {:?}", provider_name, e);
+                    }
+                }
+            }
+        }
         
         let forecast = self.combine_forecasts(results)?;
         
@@ -427,10 +435,20 @@ impl WeatherProvider for ComboProvider {
             }
         }
         
-        let results = self.fetch_with_fallback(location, |provider, loc| {
-            let loc = loc.to_string();
-            async move { provider.get_alerts(&loc).await }
-        }).await;
+        let mut results = Vec::new();
+        for provider in &self.providers {
+            if provider.supports_feature(WeatherFeature::Alerts) {
+                let provider_name = provider.name().to_string();
+                match provider.get_alerts(location).await {
+                    Ok(data) => {
+                        results.push((provider_name, data));
+                    }
+                    Err(e) => {
+                        log::error!("Provider {} failed: {:?}", provider_name, e);
+                    }
+                }
+            }
+        }
         
         let alerts = self.merge_alerts(results);
         
@@ -442,17 +460,30 @@ impl WeatherProvider for ComboProvider {
     }
     
     async fn get_historical(&self, location: &str, date: &str) -> Result<HistoricalData, WeatherError> {
-        let results = self.fetch_with_fallback(location, |provider, loc| {
-            let loc = loc.to_string();
-            let date = date.to_string();
-            async move { provider.get_historical(&loc, &date).await }
-        }).await;
+        let mut results = Vec::new();
+        for provider in &self.providers {
+            if provider.supports_feature(WeatherFeature::HistoricalData) {
+                let provider_name = provider.name().to_string();
+                match provider.get_historical(location, date).await {
+                    Ok(data) => {
+                        results.push((provider_name, data));
+                        if !self.fallback_enabled {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Provider {} failed: {:?}", provider_name, e);
+                    }
+                }
+            }
+        }
         
         if results.is_empty() {
             return Err(WeatherError::NotFound("No historical data available".to_string()));
         }
         
-        let first = results.first().unwrap();
+        let first = results.first()
+            .ok_or_else(|| WeatherError::ConfigurationError("Results unexpectedly empty".to_string()))?;
         Ok(first.1.clone())
     }
     
@@ -465,23 +496,6 @@ impl WeatherProvider for ComboProvider {
     }
 }
 
-impl AlertSeverity {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-        match (self, other) {
-            (AlertSeverity::Extreme, AlertSeverity::Extreme) => Ordering::Equal,
-            (AlertSeverity::Extreme, _) => Ordering::Greater,
-            (_, AlertSeverity::Extreme) => Ordering::Less,
-            (AlertSeverity::Severe, AlertSeverity::Severe) => Ordering::Equal,
-            (AlertSeverity::Severe, _) => Ordering::Greater,
-            (_, AlertSeverity::Severe) => Ordering::Less,
-            (AlertSeverity::Moderate, AlertSeverity::Moderate) => Ordering::Equal,
-            (AlertSeverity::Moderate, AlertSeverity::Minor) => Ordering::Greater,
-            (AlertSeverity::Minor, AlertSeverity::Moderate) => Ordering::Less,
-            (AlertSeverity::Minor, AlertSeverity::Minor) => Ordering::Equal,
-        }
-    }
-}
 
 struct WeatherCache {
     data: HashMap<String, CacheEntry>,
