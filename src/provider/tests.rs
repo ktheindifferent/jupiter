@@ -32,7 +32,7 @@ mod tests {
     
     #[test]
     fn test_alert_severity_ordering() {
-        use super::super::combo_enhanced::AlertSeverity;
+        use super::super::common::AlertSeverity;
         
         assert!(AlertSeverity::Extreme.cmp(&AlertSeverity::Severe) == std::cmp::Ordering::Greater);
         assert!(AlertSeverity::Severe.cmp(&AlertSeverity::Moderate) == std::cmp::Ordering::Greater);

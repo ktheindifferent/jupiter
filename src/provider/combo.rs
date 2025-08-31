@@ -24,8 +24,9 @@ use crate::ssl_config::{create_combo_connector, SslConfig};
 use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use crate::db_pool::{DatabasePool, DatabaseConfig, init_combo_pool, get_combo_pool};
-use crate::config::{ConfigError};
+use crate::db_pool::{DatabasePool, init_combo_pool, get_combo_pool};
+use crate::db_pool::DatabaseConfig as DbPoolConfig;
+use crate::config::{ConfigError, DatabaseConfig};
 
 // Ability to combine, average, and cache final values between all configured providers.
 
@@ -90,7 +91,7 @@ impl Config {
 
     pub async fn init(&mut self) -> JupiterResult<()> {
         // Initialize connection pool
-        let db_config = DatabaseConfig {
+        let db_config = DbPoolConfig {
             db_name: self.pg.db_name.clone(),
             username: self.pg.username.clone(),
             password: self.pg.password.clone(),
@@ -650,6 +651,14 @@ impl PostgresServer {
             password: config.password.clone(),
             address: config.address.clone(),
         }
-
+    }
+    
+    pub fn from_db_pool_config(config: &DbPoolConfig) -> PostgresServer {
+        PostgresServer {
+            db_name: config.db_name.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            address: config.host.clone(),
+        }
     }
 }

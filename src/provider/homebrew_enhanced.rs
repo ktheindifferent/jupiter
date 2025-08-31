@@ -492,8 +492,8 @@ pub async fn create_weather_report(
     report.device_type = device_type;
     
     report.save(config)
-        .map(|_| report)
-        .map_err(|e| WeatherError::DatabaseError(e.to_string()))
+        .map_err(|e| WeatherError::DatabaseError(e.to_string()))?;
+    Ok(report)
 }
 
 pub async fn get_latest_weather_report(config: Config) -> Result<Option<WeatherReport>, WeatherError> {
