@@ -118,7 +118,7 @@ pub struct Alert {
     pub regions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AlertSeverity {
     Minor,
     Moderate,
@@ -186,7 +186,10 @@ impl RateLimiter {
         let now = std::time::Instant::now();
         let window = std::time::Duration::from_secs(self.window_seconds);
         
-        let mut requests = self.requests.lock().unwrap();
+        let mut requests = match self.requests.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         requests.retain(|&req_time| now.duration_since(req_time) < window);
         
         if requests.len() < self.max_requests as usize {

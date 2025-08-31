@@ -24,8 +24,9 @@ use crate::ssl_config::{create_combo_connector, SslConfig};
 use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use crate::db_pool::{DatabasePool, DatabaseConfig, init_combo_pool, get_combo_pool};
-use crate::config::{ConfigError};
+use crate::db_pool::{DatabasePool, init_combo_pool, get_combo_pool};
+use crate::db_pool::DatabaseConfig as DbPoolConfig;
+use crate::config::{ConfigError, DatabaseConfig};
 
 // Ability to combine, average, and cache final values between all configured providers.
 
@@ -90,7 +91,7 @@ impl Config {
 
     pub async fn init(&mut self) -> JupiterResult<()> {
         // Initialize connection pool
-        let db_config = DatabaseConfig {
+        let db_config = DbPoolConfig {
             db_name: self.pg.db_name.clone(),
             username: self.pg.username.clone(),
             password: self.pg.password.clone(),
@@ -121,7 +122,9 @@ impl Config {
 
         let config = self.clone();
         let shutdown_flag = self.shutdown_flag.clone();
-        let _shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let _shutdown_rx = self.shutdown_tx.as_ref()
+            .ok_or_else(|| JupiterError::ConfigurationError("Shutdown channel not initialized".into()))?
+            .subscribe();
         let server_port = config.port;
         
         let handle = thread::spawn(move || {
@@ -293,7 +296,6 @@ impl Config {
 
                     resp.save(config.clone());
 
-                    // let objects = WeatherReport::select(config.clone(), None, None, None, None).unwrap();
                     return Response::json(&resp);
                 }
                 
@@ -310,7 +312,10 @@ impl Config {
                 let mut response = Response::text("hello world");
 
                 return response;
-            }).expect("Failed to create server");
+            }).unwrap_or_else(|e| {
+                log::error!("Failed to create server: {}", e);
+                panic!("Failed to create server: {}", e);
+            });
             
             log::info!("Combo server started on port {}", server_port);
             
@@ -323,7 +328,8 @@ impl Config {
         });
         
         if let Some(handle_mutex) = &self.server_handle {
-            let mut handle_guard = handle_mutex.lock().unwrap();
+            let mut handle_guard = handle_mutex.lock()
+                .map_err(|e| JupiterError::LockError(format!("Failed to acquire server handle lock: {}", e)))?;
             *handle_guard = Some(handle);
         }
         
@@ -351,13 +357,14 @@ impl Config {
             
             // Try to join with timeout
             let join_result = tokio::time::timeout(timeout, async move {
-                let mut handle_guard = handle_mutex_clone.lock().unwrap();
-                if let Some(handle) = handle_guard.take() {
-                    // Since we can't directly join std::thread in async context,
-                    // we'll use a different approach
-                    let _ = tokio::task::spawn_blocking(move || {
-                        handle.join()
-                    }).await;
+                if let Ok(mut handle_guard) = handle_mutex_clone.lock() {
+                    if let Some(handle) = handle_guard.take() {
+                        // Since we can't directly join std::thread in async context,
+                        // we'll use a different approach
+                        let _ = tokio::task::spawn_blocking(move || {
+                            handle.join()
+                        }).await;
+                    }
                 }
             }).await;
             
@@ -645,6 +652,14 @@ impl PostgresServer {
             password: config.password.clone(),
             address: config.address.clone(),
         }
-
+    }
+    
+    pub fn from_db_pool_config(config: &DbPoolConfig) -> PostgresServer {
+        PostgresServer {
+            db_name: config.db_name.clone(),
+            username: config.username.clone(),
+            password: config.password.clone(),
+            address: config.host.clone(),
+        }
     }
 }
