@@ -1,13 +1,4 @@
 
-// TODO - Full Acuweather API Support
-// - Locations API
-// - Forecast API
-
-// TODO - Full OpenWeather API Support
-
-// TODO - Homebrew API for homebrew weather monitoring
-
-// TODO - Combo API for averaging results between multiple providers and reducing paid API calls
 extern crate postgres;
 pub mod provider;
 pub mod auth;
@@ -17,6 +8,7 @@ pub mod db_pool;
 pub mod pool_monitor;
 pub mod config;
 pub mod error;
+pub mod utils;
 
 #[cfg(test)]
 mod tests;
@@ -24,6 +16,8 @@ mod tests;
 mod security_tests;
 #[cfg(test)]
 mod db_pool_tests;
+#[cfg(test)]
+mod test_utils;
 
 
 // https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude={part}&appid={API key}

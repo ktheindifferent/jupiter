@@ -2,6 +2,7 @@
 mod tests {
     use super::*;
     use crate::db_pool::{DatabaseConfig, DatabasePool, init_homebrew_pool, init_combo_pool};
+    use crate::test_utils::db_config::{get_test_db_config, get_test_db_config_with_pool_settings, should_skip_db_test};
     use std::time::Duration;
     use tokio;
 
@@ -12,6 +13,7 @@ mod tests {
             username: String::from("invalid_user"),
             password: String::from("invalid_pass"),
             host: String::from("invalid_host"),
+            address: String::from("invalid_host"),  // For backward compatibility
             port: Some(5432),
             pool_size: Some(5),
             connection_timeout: Some(Duration::from_secs(1)),
@@ -26,24 +28,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_retry_logic() {
-        // This test requires a properly configured database
-        // Skip if environment variables are not set
-        if std::env::var("HOMEBREW_PG_DBNAME").is_err() {
-            println!("Skipping test: Database environment variables not set");
+        if should_skip_db_test("HOMEBREW") {
             return;
         }
 
-        let config = DatabaseConfig {
-            db_name: std::env::var("HOMEBREW_PG_DBNAME").unwrap(),
-            username: std::env::var("HOMEBREW_PG_USER").unwrap(),
-            password: std::env::var("HOMEBREW_PG_PASS").unwrap(),
-            host: std::env::var("HOMEBREW_PG_ADDRESS").unwrap(),
-            port: Some(5432),
-            pool_size: Some(2),
-            connection_timeout: Some(Duration::from_secs(2)),
-            idle_timeout: Some(Duration::from_secs(60)),
-            max_lifetime: Some(Duration::from_secs(180)),
-            use_ssl: true,
+        let config = match get_test_db_config_with_pool_settings("HOMEBREW", 2, 2, false) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                println!("Test configuration error: {}", e);
+                return;
+            }
         };
 
         match init_homebrew_pool(config).await {
@@ -68,24 +62,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_exhaustion_behavior() {
-        // This test requires a properly configured database
-        if std::env::var("HOMEBREW_PG_DBNAME").is_err() {
-            println!("Skipping test: Database environment variables not set");
+        if should_skip_db_test("HOMEBREW") {
             return;
         }
 
-        let config = DatabaseConfig {
-            db_name: std::env::var("HOMEBREW_PG_DBNAME").unwrap(),
-            username: std::env::var("HOMEBREW_PG_USER").unwrap(),
-            password: std::env::var("HOMEBREW_PG_PASS").unwrap(),
-            host: std::env::var("HOMEBREW_PG_ADDRESS").unwrap(),
-            port: Some(5432),
-            pool_size: Some(1), // Very small pool
-            connection_timeout: Some(Duration::from_millis(500)),
-            idle_timeout: Some(Duration::from_secs(60)),
-            max_lifetime: Some(Duration::from_secs(180)),
-            use_ssl: true,
+        let mut config = match get_test_db_config("HOMEBREW", false) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                println!("Test configuration error: {}", e);
+                return;
+            }
         };
+        
+        // Override settings for pool exhaustion test
+        config.pool_size = Some(1); // Very small pool
+        config.connection_timeout = Some(Duration::from_millis(500));
 
         match init_combo_pool(config).await {
             Ok(pool) => {
@@ -113,22 +104,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_health_check() {
-        if std::env::var("HOMEBREW_PG_DBNAME").is_err() {
-            println!("Skipping test: Database environment variables not set");
+        if should_skip_db_test("HOMEBREW") {
             return;
         }
 
-        let config = DatabaseConfig {
-            db_name: std::env::var("HOMEBREW_PG_DBNAME").unwrap(),
-            username: std::env::var("HOMEBREW_PG_USER").unwrap(),
-            password: std::env::var("HOMEBREW_PG_PASS").unwrap(),
-            host: std::env::var("HOMEBREW_PG_ADDRESS").unwrap(),
-            port: Some(5432),
-            pool_size: Some(3),
-            connection_timeout: Some(Duration::from_secs(2)),
-            idle_timeout: Some(Duration::from_secs(60)),
-            max_lifetime: Some(Duration::from_secs(180)),
-            use_ssl: true,
+        let config = match get_test_db_config_with_pool_settings("HOMEBREW", 3, 2, false) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                println!("Test configuration error: {}", e);
+                return;
+            }
         };
 
         match DatabasePool::new_homebrew(config).await {
@@ -158,22 +143,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown() {
-        if std::env::var("COMBO_PG_DBNAME").is_err() {
-            println!("Skipping test: Database environment variables not set");
+        if should_skip_db_test("COMBO") {
             return;
         }
 
-        let config = DatabaseConfig {
-            db_name: std::env::var("COMBO_PG_DBNAME").unwrap(),
-            username: std::env::var("COMBO_PG_USER").unwrap(),
-            password: std::env::var("COMBO_PG_PASS").unwrap(),
-            host: std::env::var("COMBO_PG_ADDRESS").unwrap(),
-            port: Some(5432),
-            pool_size: Some(2),
-            connection_timeout: Some(Duration::from_secs(2)),
-            idle_timeout: Some(Duration::from_secs(60)),
-            max_lifetime: Some(Duration::from_secs(180)),
-            use_ssl: true,
+        let config = match get_test_db_config_with_pool_settings("COMBO", 2, 2, false) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                println!("Test configuration error: {}", e);
+                return;
+            }
         };
 
         match DatabasePool::new_combo(config).await {
@@ -200,22 +179,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_connections() {
-        if std::env::var("HOMEBREW_PG_DBNAME").is_err() {
-            println!("Skipping test: Database environment variables not set");
+        if should_skip_db_test("HOMEBREW") {
             return;
         }
 
-        let config = DatabaseConfig {
-            db_name: std::env::var("HOMEBREW_PG_DBNAME").unwrap(),
-            username: std::env::var("HOMEBREW_PG_USER").unwrap(),
-            password: std::env::var("HOMEBREW_PG_PASS").unwrap(),
-            host: std::env::var("HOMEBREW_PG_ADDRESS").unwrap(),
-            port: Some(5432),
-            pool_size: Some(5),
-            connection_timeout: Some(Duration::from_secs(2)),
-            idle_timeout: Some(Duration::from_secs(60)),
-            max_lifetime: Some(Duration::from_secs(180)),
-            use_ssl: true,
+        let config = match get_test_db_config_with_pool_settings("HOMEBREW", 5, 2, false) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                println!("Test configuration error: {}", e);
+                return;
+            }
         };
 
         match init_homebrew_pool(config).await {

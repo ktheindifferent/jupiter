@@ -25,8 +25,9 @@ use crate::ssl_config::{create_homebrew_connector, SslConfig};
 use crate::input_sanitizer::{InputSanitizer, DatabaseInputValidator, ValidationError};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use postgres_openssl::MakeTlsConnector;
-use crate::db_pool::{DatabasePool, DatabaseConfig, init_homebrew_pool, get_homebrew_pool};
-use crate::config::{ConfigError};
+use crate::db_pool::{DatabasePool, init_homebrew_pool, get_homebrew_pool};
+use crate::db_pool::DatabaseConfig as DbPoolConfig;
+use crate::config::{ConfigError, DatabaseConfig};
 
 // Can have multiple homebrew instruments
 // Support temperature humidity, windspeed, wind direction, percipitation, PM2.5, PM10, C02, TVOC, etc.
@@ -83,7 +84,7 @@ impl Config {
 
     pub async fn init(&mut self) -> JupiterResult<()> {
         // Initialize connection pool
-        let db_config = DatabaseConfig {
+        let db_config = DbPoolConfig {
             db_name: self.pg.db_name.clone(),
             username: self.pg.username.clone(),
             password: self.pg.password.clone(),
@@ -113,7 +114,9 @@ impl Config {
 
         let config = self.clone();
         let shutdown_flag = self.shutdown_flag.clone();
-        let _shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let _shutdown_rx = self.shutdown_tx.as_ref()
+            .ok_or_else(|| JupiterError::ConfigurationError("Shutdown channel not initialized".into()))?
+            .subscribe();
         let server_port = config.port;
         
         let handle = thread::spawn(move || {
@@ -179,7 +182,10 @@ impl Config {
                 let mut response = Response::text("hello world");
 
                 return response;
-            }).expect("Failed to create server");
+            }).unwrap_or_else(|e| {
+                log::error!("Failed to create server: {}", e);
+                panic!("Failed to create server: {}", e);
+            });
             
             log::info!("Homebrew server started on port {}", server_port);
             
@@ -359,13 +365,20 @@ impl WeatherReport {
     pub fn save(&self, config: Config) -> JupiterResult<&Self> {
         // Use async runtime to get connection from pool
         let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| JupiterError::DatabaseError(format!("Failed to create runtime: {}", e)))?;
+            .map_err(|e| {
+                log::error!("Failed to create tokio runtime: {}", e);
+                JupiterError::RuntimeError(format!("Failed to create runtime: {}", e))
+            })?;
+        
         let mut client = runtime.block_on(async {
             let pool = get_homebrew_pool()
-                .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".to_string()))?;
+                .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".into()))?;
             
             pool.get_connection_with_retry(3).await
-                .map_err(|e| JupiterError::DatabaseError(format!("Failed to get database connection: {}", e)))
+                .map_err(|e| {
+                    log::error!("Failed to get database connection: {}", e);
+                    JupiterError::DatabaseError(format!("Connection pool exhausted: {}", e))
+                })
         })?;
 
         // Search for OID matches using secure parameterized query
@@ -377,9 +390,9 @@ impl WeatherReport {
         if rows.len() == 0 {
             runtime.block_on(async {
                 client.execute("INSERT INTO weather_reports (oid, device_type, timestamp) VALUES ($1, $2, $3)",
-                    &[&self.oid.clone(),
-                    &self.device_type,
-                    &self.timestamp]
+                    &[&self.oid as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.device_type as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.timestamp as &(dyn tokio_postgres::types::ToSql + Sync)]
                 ).await
             })?;
         } 
@@ -388,8 +401,8 @@ impl WeatherReport {
             runtime.block_on(async {
                 client.execute("UPDATE weather_reports SET temperature = $1 WHERE oid = $2;", 
                 &[
-                    &self.temperature,
-                    &self.oid
+                    &self.temperature as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
                 ]).await
             })?;
         }
@@ -398,8 +411,8 @@ impl WeatherReport {
             runtime.block_on(async {
                 client.execute("UPDATE weather_reports SET humidity = $1 WHERE oid = $2;", 
                 &[
-                    &self.humidity,
-                    &self.oid
+                    &self.humidity as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
                 ]).await
             })?;
         }
@@ -408,8 +421,8 @@ impl WeatherReport {
             runtime.block_on(async {
                 client.execute("UPDATE weather_reports SET percipitation = $1 WHERE oid = $2;", 
                 &[
-                    &self.percipitation,
-                    &self.oid
+                    &self.percipitation as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
                 ]).await
             })?;
         }
@@ -418,8 +431,8 @@ impl WeatherReport {
             runtime.block_on(async {
                 client.execute("UPDATE weather_reports SET pm10 = $1 WHERE oid = $2;", 
                 &[
-                    &self.pm10,
-                    &self.oid
+                    &self.pm10 as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
                 ]).await
             })?;
         }
@@ -428,8 +441,8 @@ impl WeatherReport {
             runtime.block_on(async {
                 client.execute("UPDATE weather_reports SET pm25 = $1 WHERE oid = $2;", 
                 &[
-                    &self.pm25,
-                    &self.oid
+                    &self.pm25 as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
                 ]).await
             })?;
         }
@@ -438,8 +451,8 @@ impl WeatherReport {
             runtime.block_on(async {
                 client.execute("UPDATE weather_reports SET co2 = $1 WHERE oid = $2;", 
                 &[
-                    &self.co2,
-                    &self.oid
+                    &self.co2 as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
                 ]).await
             })?;
         }
@@ -448,8 +461,8 @@ impl WeatherReport {
             runtime.block_on(async {
                 client.execute("UPDATE weather_reports SET tvoc = $1 WHERE oid = $2;", 
                 &[
-                    &self.tvoc,
-                    &self.oid
+                    &self.tvoc as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
                 ]).await
             })?;
         }
@@ -601,6 +614,5 @@ impl PostgresServer {
             password: config.password.clone(),
             address: config.address.clone(),
         }
-
     }
 }
