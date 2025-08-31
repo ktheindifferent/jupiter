@@ -17,12 +17,69 @@ pub struct DatabaseConfig {
     pub username: String,
     pub password: String,
     pub host: String,
+    pub address: String,  // Combined host:port for backward compatibility
     pub port: Option<u16>,
     pub pool_size: Option<usize>,
     pub connection_timeout: Option<Duration>,
     pub idle_timeout: Option<Duration>,
     pub max_lifetime: Option<Duration>,
     pub use_ssl: bool,
+}
+
+impl DatabaseConfig {
+    pub fn homebrew_from_env() -> Result<Self, crate::error::JupiterError> {
+        use std::env;
+        
+        let db_name = env::var("HOMEBREW_PG_DBNAME")
+            .map_err(|_| crate::error::JupiterError::ConfigurationError("Missing HOMEBREW_PG_DBNAME".to_string()))?;
+        let username = env::var("HOMEBREW_PG_USER")
+            .map_err(|_| crate::error::JupiterError::ConfigurationError("Missing HOMEBREW_PG_USER".to_string()))?;
+        let password = env::var("HOMEBREW_PG_PASS")
+            .map_err(|_| crate::error::JupiterError::ConfigurationError("Missing HOMEBREW_PG_PASS".to_string()))?;
+        let host = env::var("HOMEBREW_PG_ADDRESS")
+            .map_err(|_| crate::error::JupiterError::ConfigurationError("Missing HOMEBREW_PG_ADDRESS".to_string()))?;
+        
+        Ok(DatabaseConfig {
+            db_name,
+            username,
+            password,
+            host: host.clone(),
+            address: host,  // For backward compatibility
+            port: Some(5432),
+            pool_size: Some(10),
+            connection_timeout: Some(Duration::from_secs(30)),
+            idle_timeout: Some(Duration::from_secs(600)),
+            max_lifetime: Some(Duration::from_secs(1800)),
+            use_ssl: true,
+        })
+    }
+    
+    pub fn combo_from_env() -> Result<Self, crate::error::JupiterError> {
+        use std::env;
+        
+        let db_name = env::var("COMBO_PG_DBNAME")
+            .map_err(|_| crate::error::JupiterError::ConfigurationError("Missing COMBO_PG_DBNAME".to_string()))?;
+        let username = env::var("COMBO_PG_USER")
+            .map_err(|_| crate::error::JupiterError::ConfigurationError("Missing COMBO_PG_USER".to_string()))?;
+        let password = env::var("COMBO_PG_PASS")
+            .map_err(|_| crate::error::JupiterError::ConfigurationError("Missing COMBO_PG_PASS".to_string()))?;
+        let host = env::var("COMBO_PG_ADDRESS")
+            .map_err(|_| crate::error::JupiterError::ConfigurationError("Missing COMBO_PG_ADDRESS".to_string()))?;
+        
+        Ok(DatabaseConfig {
+            db_name,
+            username,
+            password,
+            host: host.clone(),
+            address: host,  // For backward compatibility
+            port: Some(5432),
+            pool_size: Some(10),
+            connection_timeout: Some(Duration::from_secs(30)),
+            idle_timeout: Some(Duration::from_secs(600)),
+            max_lifetime: Some(Duration::from_secs(1800)),
+            use_ssl: true,
+        })
+    }
 }
 
 impl DatabasePool {

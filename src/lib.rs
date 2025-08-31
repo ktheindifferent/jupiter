@@ -16,6 +16,8 @@ mod tests;
 mod security_tests;
 #[cfg(test)]
 mod db_pool_tests;
+#[cfg(test)]
+mod test_utils;
 
 
 // https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lon}&exclude={part}&appid={API key}

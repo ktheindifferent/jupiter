@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  test-postgres:
+    image: postgres:15-alpine
+    container_name: weather-api-test-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: test_homebrew_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - test-postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - test-network
+
+  test-db-init:
+    image: postgres:15-alpine
+    depends_on:
+      test-postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: password
+    command: >
+      sh -c "
+        psql -h test-postgres -U postgres -c 'CREATE DATABASE IF NOT EXISTS test_combo_db;' &&
+        echo 'Test databases initialized successfully'
+      "
+    networks:
+      - test-network
+
+volumes:
+  test-postgres-data:
+    driver: local
+
+networks:
+  test-network:
+    driver: bridge
+
+# Usage:
+# ------
+# Start test database:
+#   docker-compose -f docker-compose.test.yml up -d
+#
+# Stop test database:
+#   docker-compose -f docker-compose.test.yml down
+#
+# Clean up completely (including volumes):
+#   docker-compose -f docker-compose.test.yml down -v
+#
+# View logs:
+#   docker-compose -f docker-compose.test.yml logs -f
+#
+# Run tests with test database:
+#   docker-compose -f docker-compose.test.yml up -d
+#   cargo test
+#   docker-compose -f docker-compose.test.yml down

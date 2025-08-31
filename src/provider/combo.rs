@@ -96,6 +96,7 @@ impl Config {
             username: self.pg.username.clone(),
             password: self.pg.password.clone(),
             host: self.pg.address.clone(),
+            address: self.pg.address.clone(),  // For backward compatibility
             port: Some(5432),
             pool_size: Some(20),
             connection_timeout: Some(std::time::Duration::from_secs(5)),
