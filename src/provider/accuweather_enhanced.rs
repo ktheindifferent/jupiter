@@ -6,7 +6,7 @@ use super::common::{
     HistoricalData, RateLimiter
 };
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::time::safe_timestamp_with_fallback;
 
 // Helper function to safely get current timestamp
 fn get_current_timestamp() -> Result<i64, WeatherError> {
@@ -172,7 +172,7 @@ impl WeatherProvider for AccuWeatherProvider {
                 region: location_details.administrative_area.as_ref().map(|a| a.localized_name.clone()),
                 postal_code: location_details.primary_postal_code,
             },
-            timestamp: get_current_timestamp()?,
+            timestamp: safe_timestamp_with_fallback(),
         })
     }
     

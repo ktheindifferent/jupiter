@@ -6,7 +6,7 @@ use super::common::{
     HistoricalData
 };
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::utils::time::safe_timestamp_with_fallback;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
 
@@ -168,7 +168,7 @@ impl ComboProvider {
                 region: None,
                 postal_code: None,
             }),
-            timestamp: get_current_timestamp()?,
+            timestamp: safe_timestamp_with_fallback(),
         })
     }
     
@@ -514,7 +514,7 @@ impl WeatherCache {
     }
     
     fn get(&self, key: &str, ttl_secs: u64) -> Option<serde_json::Value> {
-        let now = get_current_timestamp_u64().ok()?;
+        let now = safe_timestamp_with_fallback() as u64;
         
         self.data.get(key).and_then(|entry| {
             if now - entry.timestamp < ttl_secs {
@@ -526,7 +526,7 @@ impl WeatherCache {
     }
     
     fn set(&mut self, key: String, value: serde_json::Value) {
-        let timestamp = get_current_timestamp_u64().unwrap_or(0);
+        let timestamp = safe_timestamp_with_fallback() as u64;
         self.data.insert(key, CacheEntry { value, timestamp });
     }
 }

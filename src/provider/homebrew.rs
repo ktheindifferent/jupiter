@@ -579,6 +579,5 @@ impl PostgresServer {
             password: config.password.clone(),
             address: config.address.clone(),
         }
-
     }
 }

@@ -6,8 +6,8 @@ use super::common::{
     HistoricalData, RateLimiter
 };
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use crate::provider::homebrew::{Config, WeatherReport, PostgresServer};
+use crate::utils::time::safe_timestamp_with_fallback;
 use std::collections::HashMap;
 
 // Helper function to safely get current timestamp
@@ -153,7 +153,7 @@ impl HomebrewProvider {
     
     async fn get_historical_aggregated(&self, device_types: &[String], days: u8) -> Result<Vec<DailyAggregatedData>, WeatherError> {
         let mut daily_data = HashMap::new();
-        let now = get_current_timestamp()?;
+        let now = safe_timestamp_with_fallback();
         let start_time = now - (days as i64 * 86400);
         
         for device_type in device_types {
@@ -260,7 +260,7 @@ impl WeatherProvider for HomebrewProvider {
                 region: None,
                 postal_code: None,
             },
-            timestamp: get_current_timestamp()?,
+            timestamp: safe_timestamp_with_fallback(),
         })
     }
     
@@ -324,7 +324,7 @@ impl WeatherProvider for HomebrewProvider {
                         title: "Poor Air Quality (PM2.5)".to_string(),
                         description: format!("PM2.5 levels are elevated at {:.1} µg/m³", pm25),
                         severity: if pm25 > 55.0 { AlertSeverity::Severe } else { AlertSeverity::Moderate },
-                        start: format_timestamp(get_current_timestamp().unwrap_or(0)),
+                        start: format_timestamp(safe_timestamp_with_fallback()),
                         end: None,
                         regions: vec!["Outdoor".to_string()],
                     });
@@ -339,7 +339,7 @@ impl WeatherProvider for HomebrewProvider {
                         title: "High CO2 Levels".to_string(),
                         description: format!("Indoor CO2 levels are elevated at {:.0} ppm", co2),
                         severity: if co2 > 2000.0 { AlertSeverity::Severe } else { AlertSeverity::Moderate },
-                        start: format_timestamp(get_current_timestamp().unwrap_or(0)),
+                        start: format_timestamp(safe_timestamp_with_fallback()),
                         end: None,
                         regions: vec!["Indoor".to_string()],
                     });
@@ -352,7 +352,7 @@ impl WeatherProvider for HomebrewProvider {
                         title: "High TVOC Levels".to_string(),
                         description: format!("Indoor TVOC levels are elevated at {:.0} ppb", tvoc),
                         severity: if tvoc > 1000.0 { AlertSeverity::Severe } else { AlertSeverity::Moderate },
-                        start: format_timestamp(get_current_timestamp().unwrap_or(0)),
+                        start: format_timestamp(safe_timestamp_with_fallback()),
                         end: None,
                         regions: vec!["Indoor".to_string()],
                     });
