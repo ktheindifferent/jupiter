@@ -16,7 +16,8 @@ use crate::auth::{validate_auth_header, RateLimiter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex as AsyncMutex};
+use std::time::Duration;
 
 use tokio_postgres::{Error, Row};
 use crate::error::{JupiterError, Result as JupiterResult};
@@ -52,7 +53,7 @@ pub struct Config {
     pub pg: PostgresServer,
     pub port: u16,
     #[serde(skip)]
-    pub server_handle: Option<Arc<std::sync::Mutex<Option<JoinHandle<()>>>>>,
+    pub server_handle: Option<Arc<AsyncMutex<Option<JoinHandle<()>>>>>,
     #[serde(skip)]
     pub shutdown_flag: Arc<AtomicBool>,
     #[serde(skip)]
@@ -75,7 +76,7 @@ impl Config {
             apikey,
             pg,
             port,
-            server_handle: Some(Arc::new(std::sync::Mutex::new(None))),
+            server_handle: Some(Arc::new(AsyncMutex::new(None))),
             shutdown_flag: Arc::new(AtomicBool::new(false)),
             shutdown_tx: Some(shutdown_tx),
         }
@@ -196,10 +197,19 @@ impl Config {
             log::info!("Homebrew server shutting down...");
         });
         
+        // Store the handle in the async mutex - need to spawn a task for this
         if let Some(handle_mutex) = &self.server_handle {
-            let mut handle_guard = handle_mutex.lock()
-                .map_err(|e| JupiterError::LockError(format!("Failed to acquire server handle lock: {}", e)))?;
-            *handle_guard = Some(handle);
+            let handle_mutex_clone = handle_mutex.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(Duration::from_secs(5), handle_mutex_clone.lock()).await {
+                    Ok(mut handle_guard) => {
+                        *handle_guard = Some(handle);
+                    },
+                    Err(_) => {
+                        log::error!("Failed to acquire server handle lock within timeout");
+                    }
+                }
+            });
         }
         
         Ok(())
@@ -224,15 +234,21 @@ impl Config {
         if let Some(handle_mutex) = &self.server_handle {
             let handle_mutex_clone = handle_mutex.clone();
             
-            // Try to join with timeout
+            // Try to join with timeout using async mutex
             let join_result = tokio::time::timeout(timeout, async move {
-                if let Ok(mut handle_guard) = handle_mutex_clone.lock() {
-                    if let Some(handle) = handle_guard.take() {
-                        // Since we can't directly join std::thread in async context,
-                        // we'll use a different approach
-                        let _ = tokio::task::spawn_blocking(move || {
-                            handle.join()
-                        }).await;
+                // First acquire lock with timeout to prevent deadlock
+                match tokio::time::timeout(Duration::from_secs(2), handle_mutex_clone.lock()).await {
+                    Ok(mut handle_guard) => {
+                        if let Some(handle) = handle_guard.take() {
+                            // Since we can't directly join std::thread in async context,
+                            // we'll use a different approach
+                            let _ = tokio::task::spawn_blocking(move || {
+                                handle.join()
+                            }).await;
+                        }
+                    },
+                    Err(_) => {
+                        log::error!("Failed to acquire lock for shutdown within timeout");
                     }
                 }
             }).await;
@@ -241,8 +257,11 @@ impl Config {
                 Ok(_) => log::info!("Homebrew server thread joined successfully"),
                 Err(_) => {
                     log::warn!("Homebrew server shutdown timed out after {:?}", timeout);
-                    // Force cleanup if needed
-                    if let Ok(mut handle_guard) = handle_mutex.lock() {
+                    // Force cleanup if needed with timeout
+                    if let Ok(mut handle_guard) = tokio::time::timeout(
+                        Duration::from_secs(1),
+                        handle_mutex.lock()
+                    ).await {
                         handle_guard.take(); // Drop the handle
                     }
                 }
@@ -351,7 +370,7 @@ impl WeatherReport {
                 JupiterError::RuntimeError(format!("Failed to create runtime: {}", e))
             })?;
         
-        let client = runtime.block_on(async {
+        let mut client = runtime.block_on(async {
             let pool = get_homebrew_pool()
                 .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".into()))?;
             
@@ -369,67 +388,83 @@ impl WeatherReport {
         )?;
 
         if rows.len() == 0 {
-            runtime.block_on(client.execute("INSERT INTO weather_reports (oid, device_type, timestamp) VALUES ($1, $2, $3)",
-                &[&self.oid as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.device_type as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.timestamp as &(dyn tokio_postgres::types::ToSql + Sync)]
-            ))?;
+            runtime.block_on(async {
+                client.execute("INSERT INTO weather_reports (oid, device_type, timestamp) VALUES ($1, $2, $3)",
+                    &[&self.oid as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.device_type as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.timestamp as &(dyn tokio_postgres::types::ToSql + Sync)]
+                ).await
+            })?;
         } 
 
         if self.temperature.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET temperature = $1 WHERE oid = $2;", 
-            &[
-                &self.temperature as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET temperature = $1 WHERE oid = $2;", 
+                &[
+                    &self.temperature as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
+                ]).await
+            })?;
         }
 
         if self.humidity.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET humidity = $1 WHERE oid = $2;", 
-            &[
-                &self.humidity as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET humidity = $1 WHERE oid = $2;", 
+                &[
+                    &self.humidity as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
+                ]).await
+            })?;
         }
 
         if self.percipitation.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET percipitation = $1 WHERE oid = $2;", 
-            &[
-                &self.percipitation as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET percipitation = $1 WHERE oid = $2;", 
+                &[
+                    &self.percipitation as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
+                ]).await
+            })?;
         }
 
         if self.pm10.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET pm10 = $1 WHERE oid = $2;", 
-            &[
-                &self.pm10 as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET pm10 = $1 WHERE oid = $2;", 
+                &[
+                    &self.pm10 as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
+                ]).await
+            })?;
         }
 
         if self.pm25.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET pm25 = $1 WHERE oid = $2;", 
-            &[
-                &self.pm25 as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET pm25 = $1 WHERE oid = $2;", 
+                &[
+                    &self.pm25 as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
+                ]).await
+            })?;
         }
 
         if self.co2.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET co2 = $1 WHERE oid = $2;", 
-            &[
-                &self.co2 as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET co2 = $1 WHERE oid = $2;", 
+                &[
+                    &self.co2 as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
+                ]).await
+            })?;
         }
 
         if self.tvoc.is_some() {
-            runtime.block_on(client.execute("UPDATE weather_reports SET tvoc = $1 WHERE oid = $2;", 
-            &[
-                &self.tvoc as &(dyn tokio_postgres::types::ToSql + Sync),
-                &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
-            ]))?;
+            runtime.block_on(async {
+                client.execute("UPDATE weather_reports SET tvoc = $1 WHERE oid = $2;", 
+                &[
+                    &self.tvoc as &(dyn tokio_postgres::types::ToSql + Sync),
+                    &self.oid as &(dyn tokio_postgres::types::ToSql + Sync)
+                ]).await
+            })?;
         }
 
         return Ok(self);
