@@ -133,10 +133,10 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let hangup = async {
-        signal::unix::signal(signal::unix::SignalKind::hangup())
-            .expect("failed to install SIGHUP handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::hangup()) {
+            Ok(mut signal) => { signal.recv().await; },
+            Err(e) => { log::error!("Failed to install SIGHUP handler: {}", e); }
+        }
     };
 
     #[cfg(not(unix))]

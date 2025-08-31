@@ -12,6 +12,9 @@ pub enum JupiterError {
     SerializationError(serde_json::Error),
     AuthenticationError(String),
     RateLimitError(String),
+    RuntimeError(String),
+    LockError(String),
+    ServerError(String),
 }
 
 impl fmt::Display for JupiterError {
@@ -26,6 +29,9 @@ impl fmt::Display for JupiterError {
             JupiterError::SerializationError(e) => write!(f, "Serialization error: {}", e),
             JupiterError::AuthenticationError(msg) => write!(f, "Authentication error: {}", msg),
             JupiterError::RateLimitError(msg) => write!(f, "Rate limit error: {}", msg),
+            JupiterError::RuntimeError(msg) => write!(f, "Runtime error: {}", msg),
+            JupiterError::LockError(msg) => write!(f, "Lock error: {}", msg),
+            JupiterError::ServerError(msg) => write!(f, "Server error: {}", msg),
         }
     }
 }

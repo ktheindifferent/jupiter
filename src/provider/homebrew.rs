@@ -113,7 +113,9 @@ impl Config {
 
         let config = self.clone();
         let shutdown_flag = self.shutdown_flag.clone();
-        let _shutdown_rx = self.shutdown_tx.as_ref().unwrap().subscribe();
+        let _shutdown_rx = self.shutdown_tx.as_ref()
+            .ok_or_else(|| JupiterError::ConfigurationError("Shutdown channel not initialized".into()))?
+            .subscribe();
         let server_port = config.port;
         
         let handle = thread::spawn(move || {
@@ -179,7 +181,10 @@ impl Config {
                 let mut response = Response::text("hello world");
 
                 return response;
-            }).expect("Failed to create server");
+            }).unwrap_or_else(|e| {
+                log::error!("Failed to create server: {}", e);
+                panic!("Failed to create server: {}", e);
+            });
             
             log::info!("Homebrew server started on port {}", server_port);
             
@@ -192,7 +197,8 @@ impl Config {
         });
         
         if let Some(handle_mutex) = &self.server_handle {
-            let mut handle_guard = handle_mutex.lock().unwrap();
+            let mut handle_guard = handle_mutex.lock()
+                .map_err(|e| JupiterError::LockError(format!("Failed to acquire server handle lock: {}", e)))?;
             *handle_guard = Some(handle);
         }
         
@@ -220,13 +226,14 @@ impl Config {
             
             // Try to join with timeout
             let join_result = tokio::time::timeout(timeout, async move {
-                let mut handle_guard = handle_mutex_clone.lock().unwrap();
-                if let Some(handle) = handle_guard.take() {
-                    // Since we can't directly join std::thread in async context,
-                    // we'll use a different approach
-                    let _ = tokio::task::spawn_blocking(move || {
-                        handle.join()
-                    }).await;
+                if let Ok(mut handle_guard) = handle_mutex_clone.lock() {
+                    if let Some(handle) = handle_guard.take() {
+                        // Since we can't directly join std::thread in async context,
+                        // we'll use a different approach
+                        let _ = tokio::task::spawn_blocking(move || {
+                            handle.join()
+                        }).await;
+                    }
                 }
             }).await;
             
@@ -339,13 +346,20 @@ impl WeatherReport {
     pub fn save(&self, config: Config) -> JupiterResult<&Self> {
         // Use async runtime to get connection from pool
         let runtime = tokio::runtime::Runtime::new()
-            .map_err(|e| JupiterError::DatabaseError(format!("Failed to create runtime: {}", e)))?;
+            .map_err(|e| {
+                log::error!("Failed to create tokio runtime: {}", e);
+                JupiterError::RuntimeError(format!("Failed to create runtime: {}", e))
+            })?;
+        
         let client = runtime.block_on(async {
             let pool = get_homebrew_pool()
-                .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".to_string()))?;
+                .ok_or_else(|| JupiterError::DatabaseError("Database pool not initialized".into()))?;
             
             pool.get_connection_with_retry(3).await
-                .map_err(|e| JupiterError::DatabaseError(format!("Failed to get database connection: {}", e)))
+                .map_err(|e| {
+                    log::error!("Failed to get database connection: {}", e);
+                    JupiterError::DatabaseError(format!("Connection pool exhausted: {}", e))
+                })
         })?;
 
         // Search for OID matches using secure parameterized query
